@@ -1,0 +1,21 @@
+t_sec,kind,text,value,extra
+0,mark,Start · Selbsttest OK,,
+48,mark,11:11,,
+400,puls,Puls 79 /min,79,
+560,kineto,Kineto 28% (23%),28,23
+620,puls,Puls 83 /min,83,
+900,puls,Puls 83 /min,83,
+1180,kineto,Kineto 37% (23%),37,23
+1320,puls,Puls 82 /min,82,
+1500,puls,Puls 83 /min,83,
+1680,kineto,Kineto 28% (23%),28,23
+1860,puls,Puls 76 /min,76,
+2100,puls,Puls 74 /min,74,
+2280,kineto,Kineto 51% (23%),51,23
+2520,puls,Puls 74 /min,74,
+2700,kineto,Kineto 53% (23%),53,23
+2940,puls,Puls 74 /min,74,
+3180,kineto,Kineto 53% (23%),53,23
+3360,puls,Puls 81 /min,81,
+3540,puls,Puls 84 /min,84,
+3660,kineto,Kineto 49% (24%),49,24

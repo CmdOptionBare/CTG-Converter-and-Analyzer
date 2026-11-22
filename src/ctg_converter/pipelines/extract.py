@@ -400,6 +400,118 @@ def _detect_kineto_events(
     return events
 
 
+def _nearest_ink_distance(
+    trace_u8: np.ndarray,
+    y_px: np.ndarray,
+    search: int = 48,
+    ink_min: int = _INK_MIN,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest ink row and its absolute distance. Distance stays inf past ``search``."""
+    height, width = trace_u8.shape
+    yi = np.clip(np.rint(y_px).astype(np.int32), 0, height - 1)
+    cols = np.arange(width, dtype=np.int32)
+    nearest = np.full(width, np.nan, dtype=np.float32)
+    dist = np.full(width, np.inf, dtype=np.float32)
+    for delta in range(0, int(search) + 1):
+        shifts = (0,) if delta == 0 else (-delta, delta)
+        for shift in shifts:
+            yy = np.clip(yi + shift, 0, height - 1)
+            hit = (trace_u8[yy, cols] >= ink_min) & (dist > delta)
+            dist = np.where(hit, float(delta), dist)
+            nearest = np.where(hit, yy.astype(np.float32), nearest)
+    return nearest, dist
+
+
+def _unique_ink_row(column: np.ndarray, y_center: float, radius: int, ink_min: int) -> float | None:
+    """Mean row of the single ink cluster inside ±radius. None when the ink splits."""
+    height = int(column.shape[0])
+    y0 = int(round(float(y_center)))
+    lo = max(0, y0 - radius)
+    hi = min(height, y0 + radius + 1)
+    if hi <= lo:
+        return None
+    rows = np.flatnonzero(column[lo:hi] >= ink_min)
+    if rows.size == 0:
+        return None
+    rows = rows + lo
+    if rows.size >= 2 and bool(np.any(np.diff(rows) > 1)):
+        return None
+    return float(rows.mean())
+
+
+def _correct_off_ink_track(
+    trace_u8: np.ndarray,
+    y_px: np.ndarray,
+    reward: np.ndarray,
+    reward_y0: int,
+    x0: int,
+    x1: int,
+    px_per_sec: float,
+    ink_min: int = _INK_MIN,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pull a track onto a unique strong stroke and drop long interior misses.
+
+    After Viterbi, a column that sits 5 or 6 px off the nearest ink is snapped
+    onto that stroke when the ink inside ±6 px is one cluster and its reward is
+    clearly stronger than the tracked row. A contiguous interior run longer
+    than 12 s that remains more than 4 px from the nearest ink is marked null
+    where that snap is ambiguous or out of reach. The snap only fills holes
+    between the first and last column already within 4 px of ink, so the
+    leading grid ride and the paper edge stay blank.
+    """
+    y_out = np.asarray(y_px, dtype=np.float32).copy()
+    drop = np.zeros(y_out.shape[0], dtype=bool)
+    width = int(y_out.shape[0])
+    x_start = int(max(0, min(width, x0)))
+    x_end = int(max(x_start, min(width, x1)))
+    if x_end - x_start < 8 or reward.size == 0:
+        return y_out, drop
+
+    _nearest, dist = _nearest_ink_distance(trace_u8, y_out, search=48, ink_min=ink_min)
+    reward_h, reward_w = reward.shape
+
+    def reward_at(y_abs: float, x: int) -> float:
+        row = int(round(y_abs)) - int(reward_y0)
+        if x < 0 or x >= reward_w or row < 0 or row >= reward_h:
+            return 0.0
+        return float(reward[row, x])
+
+    on_ink = dist <= 4.0
+    interior = on_ink[x_start:x_end]
+    if not np.any(interior):
+        return y_out, drop
+    first_on = x_start + int(np.argmax(interior))
+    last_on = x_start + int(np.flatnonzero(interior)[-1])
+
+    for x in range(first_on + 1, last_on):
+        gap = float(dist[x])
+        if not (4.0 < gap <= 6.0):
+            continue
+        center = _unique_ink_row(trace_u8[:, x], float(y_out[x]), radius=6, ink_min=ink_min)
+        if center is None or abs(center - float(y_out[x])) > 6.0:
+            continue
+        reward_new = reward_at(center, x)
+        reward_old = reward_at(float(y_out[x]), x)
+        if reward_new < 12.0 or reward_new < reward_old + 4.0:
+            continue
+        y_out[x] = np.float32(center)
+
+    _nearest_after, dist_after = _nearest_ink_distance(trace_u8, y_out, search=48, ink_min=ink_min)
+    min_run = 12.0 * float(px_per_sec)
+    x = first_on + 1
+    while x < last_on:
+        if not (dist_after[x] > 4.0):
+            x += 1
+            continue
+        run_start = x
+        while x < last_on and dist_after[x] > 4.0:
+            x += 1
+        run_end = x
+        if run_start > first_on and run_end < last_on and (run_end - run_start) > min_run:
+            drop[run_start:run_end] = True
+    return y_out, drop
+
+
 def _clock_at_left_edge(header_iso: str, first_stamp_x_px: float | None, px_per_sec: float) -> datetime:
     """Clock time at panorama x = 0.
 
@@ -547,6 +659,30 @@ def run_extract_pipeline(
     y_mhr_px = float(fhr_y0) + med3(y_mhr_rel)
     y_toco_px = float(toco_y0) + med3(y_toco_rel)
 
+    # Snap only after the pen is down. The leader is still the 110 bpm grid.
+    fhr_grid_step = 0.25 * px_per_cm
+    pen_start = _leading_gridlock_end(y_fhr_px, origin=float(fhr_y0), step=fhr_grid_step)
+    y_fhr_px, fhr_drop = _correct_off_ink_track(
+        trace_u8,
+        y_fhr_px,
+        fhr_reward,
+        fhr_y0,
+        pen_start,
+        w,
+        px_per_sec,
+    )
+    mhr_drop = np.zeros(w, dtype=bool)
+    if has_mhr_trace:
+        y_mhr_px, mhr_drop = _correct_off_ink_track(
+            trace_u8,
+            y_mhr_px,
+            fhr_reward,
+            fhr_y0,
+            pen_start,
+            w,
+            px_per_sec,
+        )
+
     fhr_bpm_px = np.clip(210.0 - (y_fhr_px - fhr_y0) / fhr_px_per_bpm, 50.0, 210.0)
     mhr_bpm_px = (
         np.clip(210.0 - (y_mhr_px - fhr_y0) / fhr_px_per_bpm, 45.0, 140.0)
@@ -575,8 +711,6 @@ def run_extract_pipeline(
     # maternal path is on the same time stamp until that same column; afterwards
     # it lies on its own pen (often on the 70 or 80 line, so it cannot be told
     # from the grid by y alone).
-    fhr_grid_step = 0.25 * px_per_cm
-    pen_start = _leading_gridlock_end(y_fhr_px, origin=float(fhr_y0), step=fhr_grid_step)
     if pen_start > 0:
         fhr_valid[:pen_start] = False
         mhr_valid[:pen_start] = False
@@ -597,6 +731,8 @@ def run_extract_pipeline(
             toco_valid[zx:zx1] = False
         zx = zx1
 
+    fhr_valid &= ~fhr_drop
+    mhr_valid &= ~mhr_drop
     fhr_valid = _bridge_internal_gaps(fhr_valid, _INK_BRIDGE_PX)
     mhr_valid = _bridge_internal_gaps(mhr_valid, _INK_BRIDGE_PX)
     toco_valid = _bridge_internal_gaps(toco_valid, _INK_BRIDGE_PX)
@@ -706,7 +842,9 @@ def run_extract_pipeline(
 
     # Save pixel-space curve coordinates so PySide6 Studio can toggle live vector overlays!
     curves_px_path = paths.output_dir / "extracted_curves_px.json"
-    step_px = max(1, int(round(0.04 * px_per_cm)))  # every 4 px = 0.4 mm for lightweight GUI polyline
+    # Every pixel. A 4 px chord cuts the corners of the pen and the validation
+    # then scores that shortcut as off the ink. The tracker itself is denser.
+    step_px = 1
     xs_sub = list(range(0, w, step_px))
     if xs_sub[-1] != w - 1:
         xs_sub.append(w - 1)

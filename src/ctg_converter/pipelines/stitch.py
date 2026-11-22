@@ -36,7 +36,7 @@ class StitchConfig:
     use_onnx_matcher: bool = True
     min_overlap_px: int = 120
     max_abs_dy_px: int = 10
-    feather_width_px: int = 9
+    feather_width_px: int = 25
     export_png: bool = True
     export_webp: bool = True
     webp_quality: int = 92

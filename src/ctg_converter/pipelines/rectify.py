@@ -763,6 +763,8 @@ def rectify_ctg_frame(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
+    # Erode 3 px to strip any INTER_CUBIC boundary fringe against dimmed non-paper regions
+    rect_mask = cv2.erode(rect_mask, np.ones((7, 7), dtype=np.uint8))
 
     quality = measure_grid_quality(rect_grid, rect_mask, px_per_cm=px_per_cm)
     quality["initial_skew_deg"] = round(float(skew_deg), 3)

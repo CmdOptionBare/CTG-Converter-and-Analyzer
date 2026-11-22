@@ -38,7 +38,7 @@ class DatasetManifest:
     paper_speed_cm_per_min: float = 1.0
     fhr_range_bpm: tuple[int, int] = (60, 200)
     toco_range_units: tuple[int, int] = (0, 100)
-    target_px_per_cm: int = 48
+    target_px_per_cm: int = 100
     notes: str = ""
     frames: list[FrameEntry] = field(default_factory=list)
 
@@ -60,7 +60,7 @@ class DatasetManifest:
             paper_speed_cm_per_min=float(data.get("paper_speed_cm_per_min", 1.0)),
             fhr_range_bpm=tuple(data.get("fhr_range_bpm", [60, 200])),  # type: ignore[arg-type]
             toco_range_units=tuple(data.get("toco_range_units", [0, 100])),  # type: ignore[arg-type]
-            target_px_per_cm=int(data.get("target_px_per_cm", 48)),
+            target_px_per_cm=int(data.get("target_px_per_cm", 100)),
             notes=data.get("notes", ""),
             frames=frames,
         )

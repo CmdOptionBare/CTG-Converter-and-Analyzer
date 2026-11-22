@@ -32,9 +32,9 @@ from PySide6.QtWidgets import (
 from ctg_converter.dataset.manifest import DatasetManifest, DatasetPaths
 from ctg_converter.pipelines.extract import (
     ExtractConfig,
-    export_to_ctg_project1,
     run_extract_pipeline,
 )
+from ctg_converter.pipelines.web_export import default_web_dir, export_to_web_app
 from ctg_converter.pipelines.stitch import (
     WEBP_MAX_DIMENSION_PX,
     StitchConfig,
@@ -42,6 +42,12 @@ from ctg_converter.pipelines.stitch import (
 )
 
 from .tiled_canvas import TiledImageCanvas
+
+
+def _median_present(values: list) -> float:
+    """Median of the numeric samples, skipping gaps the extractor left as null."""
+    nums = [float(v) for v in values if isinstance(v, (int, float))]
+    return float(np.median(nums)) if nums else 0.0
 
 
 class StitchPanoramaTab(QWidget):
@@ -261,8 +267,8 @@ class StitchPanoramaTab(QWidget):
         sess_p = self._paths.output_dir / "ctg_session.json"
         if sess_p.exists():
             sess = json.loads(sess_p.read_text(encoding="utf-8"))
-            f_med = float(np.median(sess["fhr"])) if sess.get("fhr") else 0.0
-            m_med = float(np.median(sess["mhr"])) if sess.get("mhr") else 0.0
+            f_med = _median_present(sess.get("fhr") or [])
+            m_med = _median_present(sess.get("mhr") or [])
             extra_line = f"\nWerte (1 Hz): {len(sess.get('fhr', []))}s | FHF ~{f_med:.0f} bpm | Puls ~{m_med:.0f} bpm"
         self.lbl_summary.setText(
             f"Panorama:    {m['panorama_width_px']} x {m['panorama_height_px']} px\n"
@@ -439,14 +445,17 @@ class StitchPanoramaTab(QWidget):
     def _export_web_repo(self) -> None:
         if self._paths is None:
             return
+        default_dir = default_web_dir()
         folder = QFileDialog.getExistingDirectory(
-            self, "Ziel-Repository von CTG-Project1 (CTG BLATT) auswählen", str(Path.home())
+            self,
+            "CTG-Blatt Web-App-Verzeichnis",
+            str(default_dir if default_dir.is_dir() else Path.home()),
         )
         if not folder:
             return
-        out = export_to_ctg_project1(self._paths, Path(folder))
+        out = export_to_web_app(self._paths, Path(folder))
         self.status_message.emit(
-            f"CTG-Blatt Web-Export abgeschlossen: {out['session_json']} ({out['scans_exported']} Scans)"
+            f"CTG-Blatt Web-Export abgeschlossen: {out['session_json']} ({out['scans']} Bilder)"
         )
 
     def run_stitch(self) -> None:

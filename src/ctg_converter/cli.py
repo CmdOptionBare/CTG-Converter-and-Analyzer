@@ -17,11 +17,11 @@ from ctg_converter.dataset import (
 from ctg_converter.pipelines.enhance import EnhanceConfig, run_enhance_pipeline
 from ctg_converter.pipelines.extract import (
     ExtractConfig,
-    export_to_ctg_project1,
     run_extract_pipeline,
 )
 from ctg_converter.pipelines.rectify import RectifyConfig, run_rectify_pipeline
 from ctg_converter.pipelines.stitch import StitchConfig, run_stitch_pipeline
+from ctg_converter.pipelines.web_export import default_web_dir, export_to_web_app
 
 
 def _resolve_dataset_paths(args: argparse.Namespace) -> DatasetPaths:
@@ -102,13 +102,22 @@ def main(argv: list[str] | None = None) -> int:
     p_ext.add_argument("--started-at", default="2026-11-22T11:10:12", help="ISO start timestamp on paper")
     p_ext.add_argument("--session-id", default=None, help="Session ID for CTG-Project1 JSON")
 
-    # export-web (Bridge to CmdOptionBare/CTG-Project1)
+    # export-web (CTG-Blatt viewer in this repo)
     p_web = sub.add_parser(
         "export-web",
-        help="Export calibrated CtgSession JSON, trace.csv, and scans into CmdOptionBare/CTG-Project1",
+        help="Write the extracted session, panorama and CSV into the CTG-Blatt web app",
     )
     add_ds_args(p_web)
-    p_web.add_argument("--target-repo", required=True, help="Path to local CTG-Project1 repository")
+    p_web.add_argument(
+        "--web-dir",
+        default=None,
+        help="Web app directory (default: the repository web/ directory)",
+    )
+    p_web.add_argument(
+        "--target-repo",
+        default=None,
+        help="Alias of --web-dir",
+    )
     p_web.add_argument("--session-id", default=None, help="Override session ID (e.g. 2026-11-22)")
 
     # gui
@@ -180,11 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export-web":
-        out = export_to_ctg_project1(
-            paths,
-            target_repo_dir=Path(args.target_repo),
-            session_id=args.session_id,
-        )
+        web_dir = Path(args.web_dir or args.target_repo or default_web_dir())
+        out = export_to_web_app(paths, web_dir, session_id=args.session_id)
         out["elapsed_sec"] = round(time.perf_counter() - t0, 2)
         print(json.dumps(out, indent=2))
         return 0

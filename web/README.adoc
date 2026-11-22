@@ -1,0 +1,98 @@
+= CTG Blatt (Web-Viewer)
+:toc:
+:icons: font
+
+Der **CTG Blatt**-Viewer im Ordner `web/` zeigt Aufnahmen von CTG-Papierfotos im Kästchenmaß des Papiers (1 cm/min, 20 bpm/cm, 2 kPa/cm).
+
+[NOTE]
+====
+Dies ist keine medizinische Diagnose und kein Medizinprodukt — nur eine persönliche Ablesung zur Orientierung.
+====
+
+== Zusammenspiel mit der Python-Pipeline
+
+Die Anwendung liest **keine Rohfotos** direkt ein. Sichtbare Daten und Assets kommen aus dem Export der Pipeline im Repository-Root:
+
+[cols="1,2",options="header"]
+|===
+| Pfad | Inhalt
+| `web/src/data/ctg/<id>.json` | Metadaten und Zeitreihe pro Aufnahme
+| `web/public/ctg/<id>/` | Aufgerichtete Keyframe-Bilder und zugehörige Dateien
+|===
+
+Diese Dateien erzeugt die Python-CTG-Pipeline mit:
+
+[source,bash]
+----
+ctg-tool export-web
+----
+
+[IMPORTANT]
+====
+Führt `ctg-tool export-web` nach neuen Pipeline-Läufen aus, bevor Sie den Viewer testen oder deployen — andernfalls fehlen IDs oder Bilder.
+====
+
+== Voraussetzungen
+
+* Node.js **22** (empfohlen)
+* `npm` (mitgeliefert)
+
+== Installation
+
+Im Verzeichnis `web/`:
+
+[source,bash]
+----
+cd web
+npm install
+----
+
+== Entwicklungsserver
+
+[source,bash]
+----
+npm run dev
+----
+
+Der Server lauscht auf `http://127.0.0.1:8080/` (`0.0.0.0:8080` im Netzwerk).
+
+Alternativ (idempotent, wenn Port 8080 schon belegt ist):
+
+[source,bash]
+----
+sh startup.sh
+----
+
+[TIP]
+====
+`startup.sh` wechselt in dasselbe Verzeichnis wie die Skriptdatei — der Viewer funktioniert damit unabhängig vom Checkout-Pfad des Repos.
+====
+
+== npm-Skripte
+
+[cols="2,4",options="header"]
+|===
+| Befehl | Zweck
+| `npm run dev` | Vite-Entwicklungsserver (Port 8080)
+| `npm run build` | Produktionsbuild + Datenbank-Migration (`db:migrate`)
+| `npm run build:dev` | Build im Development-Modus
+| `npm run preview` | Vorschau des gebauten Bundles
+| `npm run preview:restart` | Preview-Server neu starten
+| `npm run preview:stop` | Preview-Server stoppen
+| `npm run typecheck` | TypeScript-Prüfung (`tsc --noEmit`)
+| `npm run lint` | ESLint
+| `npm test` | Skript- und Unit-Tests
+| `npm run db:migrate` | Migrationen (PGLite lokal, sonst `DATABASE_URL`)
+| `npm run check:auth` | Auth-Invarianten gegen den Dev-Server prüfen
+| `npm run format` | Prettier
+|===
+
+== Auth und lokale Konfiguration
+
+`npm run dev`, `build` und `preview` lesen `.grok/app-env.json`. Die eingecheckte Datei setzt `VITE_AUTH_ENABLED=false`, damit die Seite lokal ohne Anmeldung startet. Fehlt die Datei, ist die Anmeldung eingeschaltet. Eine gesetzte Umgebungsvariable hat immer Vorrang vor der Datei.
+
+WARNING: Die Seite zeigt eine persönliche CTG-Aufnahme. Vor jeder öffentlichen Bereitstellung muss in der Umgebung des Hosters `VITE_AUTH_ENABLED=true` gesetzt sein, sonst ist die Aufnahme ohne Anmeldung sichtbar.
+
+== Build-Ausgabe
+
+Produktionsartefakte landen unter `.vercel/output/` (Nitro/Vercel-Preset). Ordner wie `node_modules/`, `.vercel/`, `dist/` und Caches sind per `.gitignore` ausgeschlossen.

@@ -1,0 +1,203 @@
+= CTG Converter & Analyzer
+:author: CTG Pipeline Team
+:revnumber: 0.1.0
+:revdate: 2026-11-22
+:toc: macro
+:toclevels: 3
+:icons: font
+:experimental:
+:source-highlighter: highlight.js
+:sectnums:
+:paper-model: Philips M2702A / M1911A (1 cm/min, 20 bpm/cm)
+:canon-scale: 100 px/cm
+
+Speicher- und CPU-schonendes Hybrid-System zur Vorverarbeitung, metrischen 90°-Kästchen-Entzerrung, Panorama-Stitching (PNG & WebP) und kalibrierter Bild-zu-Wert-Kurvenextraktion fotografierter Kardiotokografie-Streifen ({paper-model}).footnote:[Entwickelt für handelsübliche 4-Kern-CPUs ohne dedizierte GPU bei unter 410 MB Peak-RAM über 21 hochauflösende 12-MP-Aufnahmen.]
+
+toc::[]
+
+[[ueberblick]]
+== Projektziel & Architektur-Überblick
+
+Handgehaltene Smartphone-Fotos langer CTG-Papierstreifen weisen Schräglagen, Trapez-/Perspektivverzerrungen (_Sägewinkel_), Papierfalten, Abschattungen, gemischte Kamera-Orientierungen (`0°` vs. `90° CCW`) sowie ein hochgradig periodisches `2,5 mm`-Millimetergitter auf. Klassische Panorama-Stitcher scheitern daran, weil sie entweder die Perspektive über 20 Bilder hinweg aufschaukeln oder das periodische grüne Gitter um ganze Kästchen versetzt einrasten lassen.
+
+IMPORTANT: Dieses Projekt löst das Problem durch **metrische Vor-Entzerrung jedes Einzelbildes auf exakt `{canon-scale}` (`1 px = 0,1 mm`) vor dem eigentlichen Stitching** sowie eine **Trennung von Grün-Gitter und Schwarz-Kurve** für eindeutiges, mehrdeutigkeitsfreies Überlappungs-Matching.
+
+[mermaid]
+----
+flowchart LR
+    A["Rohfotos (Ordner / Git LFS)"] --> B["Pipeline 1: Enhance\nFlachfeld + Gitter/Kurve trennen"]
+    B --> C["Pipeline 2: Rectify\nProjektiv-Kamm & X-Fächer -> 90° @ 100 px/cm"]
+    C --> D["Pipeline 3: Stitch\nMasked FFT NCC + ONNX Patch-RANSAC + DP-Seam"]
+    D --> E["Riesiges Panorama\npanorama.png & panorama.webp"]
+    D --> F["Pipeline 4: Extract\nGlobales Viterbi-Kurven-Tracking (1 Hz)"]
+    F --> G["Web-Viewer in web/\nSitzung + Panorama + trace.csv"]
+    F --> H["Pipeline-Prüfung\nvalidation_report.json"]
+----
+
+NOTE: Detaillierte mathematische Hintergründe der vier Pipelines und der Web-Anbindung finden sich in xref:docs/architecture.adoc[docs/architecture.adoc].
+
+[[ordnerstruktur]]
+== Daten- & Verzeichnisstruktur
+
+Alle Eingabequellen (migrierte Testbilder, CLI-Ordnerimporte oder GUI-Importe) folgen einem einheitlichen, pro Aufnahme gekapselten Layout:
+
+[cols="2,3,1",options="header"]
+|===
+|Pfad |Bedeutung |Git-Status
+
+|`data/inputs/<split>/<dataset_id>/raw/`
+|Geordnete Originalaufnahmen (`frame_0001.png` ... `frame_0021.png`, über Git LFS verwaltet)
+|Versioniert (LFS)
+
+|`data/inputs/<split>/<dataset_id>/manifest.json`
+|Aufnahme-Metadaten (`paper_speed_cm_per_min`, `target_px_per_cm`, optionale manuelle `dx`/`dy`-Overrides)
+|Versioniert
+
+|`data/interim/<split>/<dataset_id>/enhanced/`
+|Beleuchtungskorrigierte Bilder sowie getrennte Layer (`*_grid.png`, `*_trace.png`, `*_mask.png`)
+|Ignoriert (lokal)
+
+|`data/interim/<split>/<dataset_id>/rectified/`
+|Exakt 90°-entzerrte Streifenabschnitte auf kanonischer Höhe (`1420 px` bei `{canon-scale}`)
+|Ignoriert (lokal)
+
+|`data/outputs/<split>/<dataset_id>/`
+|`panorama.png`, `panorama.webp`, `panorama_trace.png`, `trace.csv`, `ctg_session.json`, `stitch_metadata.json`
+|Ignoriert (lokal)
+|===
+
+[[installation]]
+== Installation & Schnellstart
+
+[source,bash]
+----
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]" # <1>
+git lfs pull                      # <2>
+----
+<1> Installiert `numpy`, `scipy`, `opencv-python-headless` (bewusst headless, um Qt-Konflikte mit `PySide6` auszuschließen), `Pillow`, `PySide6`, `onnxruntime` und `pytest`.
+<2> Lädt die 21 realen Testaufnahmen unter `data/inputs/test/2026-11-22_philips_ctg_001/raw/`.
+
+=== CLI-Kommandos (`ctg-tool`)
+
+[source,bash]
+----
+# Verfügbare Datensätze auflisten
+.venv/bin/ctg-tool list
+
+# Komplettpipeline (Enhance -> Rectify -> Stitch -> Viterbi-Extraktion) ausführen
+.venv/bin/ctg-tool run-all --split test --dataset-id 2026-11-22_philips_ctg_001
+
+# Neuen beliebigen Bildordner als Datensatz importieren
+.venv/bin/ctg-tool import /pfad/zu/fotos --dataset-id aufnahme_02 --split imports
+
+# Sitzung, Panorama und CSV in den Web-Viewer unter web/ schreiben
+.venv/bin/ctg-tool export-web --split test --dataset-id 2026-11-22_philips_ctg_001
+
+# Panorama und Werte gegen das bedruckte Papier prüfen (validation_report.json)
+.venv/bin/python -m ctg_converter.pipelines.validate --split test --dataset-id 2026-11-22_philips_ctg_001
+----
+
+[[visuelle-werkzeuge]]
+== Visuelle PySide6-Werkzeuge
+
+Start des Desktop-Studios:
+
+[source,bash]
+----
+.venv/bin/ctg-tool gui
+----
+
+Das Studio arbeitet mit einem gekachelten `1024×1024`-`QGraphicsView`-Canvas (`TiledImageCanvas`), sodass selbst sehr breite Panoramen ohne X11-Pixmap-Limits und bei unter `300 MB` RAM flüssig gezoomt werden können:
+
+1. **Werkzeug 1 — Bildverbesserung & 90°-Kästchen-Ausrichtung**:
+   * Umschaltung über menu:Ansichts-Stufe[1. Rohbild | 2. Beleuchtungskorrigiert | 3. Isoliertes Grün-Gitter | 4. Isolierte Schwarz-Kurve | 5. 90°-Entzerrt].
+   * Zuschaltbares kanonisches 90°-Kontrollgitter (`1 cm` Hauptlinien, `25 px` = `2,5 mm` Kästchenmaß).
+   * Feinregler für Grün-Gitter-Kontrast, Schwarz-Kurven-Kontrast, Schärfung, Zielmaßstab (`px/cm`) und Grob-Orientierung (`Automatisch`, `0°`, `90°`, `180°`, `270°`) mit Direkt-Button btn:[Aktuelles Bild verbessern & 90°-ausrichten].
+2. **Werkzeug 2 — Enden zusammenfügen, Kurven-Kontrolle & Export**:
+   * Übergangstabelle aller Bildpaare mit `dx`, `dy`, Überlappungsbreite, ONNX-Inliern und Konfidenz-Ampel.
+   * **Paar-Deckungskontrolle (Rot/Cyan)** sowie **50/50-Alpha-Überblendung**; bei Bedarf manuelle Feinjustierung in `1 px`-Schritten oder exakt kastenweise über btn:[-1 Kästchen (-25px)] / btn:[+1 Kästchen (+25px)].
+   * Direktes Einblenden der extrahierten Kurven (`FHF` rot, mütterlicher `Puls` orange, `Toco` blau) sowie Export über btn:[Als PNG speichern...], btn:[Als WebP speichern...], btn:[Werte extrahieren (CSV + JSON)] und btn:[An CTG-Blatt Web-App senden...].
+
+[[web-viewer]]
+== Web-Viewer (`web/`)
+
+Die Web-Darstellung aus `CmdOptionBare/CTG-Project1` (CTG BLATT) liegt als `web/` in diesem Repository. Sie zeigt die Werte der Pipeline 4 statt der früheren Hand-Ablesung und legt auf Wunsch das Panorama unter die gezeichneten Kurven.
+
+`ctg-tool export-web` prüft die Sitzung und schreibt:
+
+* `web/src/data/ctg/<id>.json`: Werte im 1-Sekunden-Raster, Kalibrierung und Lage des Panoramas. Stellen ohne Kurve sind `null`.
+* `web/public/ctg/<id>/panorama.webp`, `trace.csv` und `events.csv`.
+* `web/src/data/sessions.ts`: Liste aller Sitzungen.
+
+Mit `--web-dir` lässt sich ein anderes Zielverzeichnis angeben. Start und Tests der Web-App beschreibt xref:web/README.adoc[web/README.adoc].
+
+[[bekannte-grenzen]]
+== Bekannte Grenzen
+
+WARNING: Die Werte sind eine automatische Ablesung und keine medizinische Aussage. Sie sind nur gegen das bedruckte Papier dieser einen Aufnahme geprüft.
+
+* *Zeitachse:* Das Panorama ist zwischen den Stempeln 11:20 und 12:20 Uhr `5925 px` lang statt `6000 px` (`−1,3 %`). Die Uhrzeit ist am ersten Stempel (11:11 Uhr) ausgerichtet und läuft bis 12:20 Uhr etwa eine Minute vor. Ursache ist der Maßstab einzelner entzerrter Bilder, am stärksten bei Bild 16.
+* *Nähte:* 7 von 20 Nähten haben eine Konfidenz unter `0,45`. Bei 12:00 und 12:10 Uhr ist der Stempeltext im Panorama doppelt zu sehen.
+* *Aufnahmebeginn:* Herzfrequenz und Puls bleiben leer, solange die Kurvenverfolgung auf einer Gitterlinie liegt. Eine Kurve, die zu Beginn tatsächlich auf einer Gitterlinie verläuft, würde abgeschnitten.
+* *Mütterlicher Puls:* Die Verfolgung glättet. An einer Stelle steht `Puls 74 /min` gedruckt, gelesen werden `80,9`.
+* *Kineto:* Die Balken am oberen Toco-Rand werden als Ereignisse mit mindestens 25 Sekunden Abstand gemeldet. Dichte Balkengruppen werden dadurch ausgedünnt; die 90 Ereignisse sind nicht einzeln geprüft.
+* *Toco:* Diese Aufnahme enthält keine Wehe über etwa `30` Einheiten. Hohe Ausschläge sind ungetestet.
+* *Zweite Fotoserie:* Ein Probelauf mit 11 kleineren Fotos (`1299×1732 px`) derselben Aufnahme ergab kein brauchbares Panorama.
+
+[%collapsible]
+.Gemessene Benchmark-Werte auf dem 21-Bilder-Realtest (`2026-11-22_philips_ctg_001`)
+====
+[cols="2,2,2",options="header"]
+|===
+|Metrik |Ergebnis |Bemerkung
+
+|Automatische Grob-Orientierung (`0°` vs. `90° CW`)
+|`21 / 21` (`100 %`)
+|`frame_0001..0012` Hochformat, `frame_0013..0021` `90° CCW` gedreht
+
+|Orthogonalität nach Pipeline 2
+|`89,45° – 90,35°` (Mittel `90,01°`, Median `90,00°`)
+|Einzelner Remap-Durchlauf (`cv2.remap`) auf `1420 px` Zielhöhe
+
+|Hybrides Paar-Matching (`NCC + ONNX`)
+|`20 / 20` Paare (`10 – 89` ONNX-Inlier)
+|`\|dy\| <= 1 px`; 7 der 20 Nähte haben eine Konfidenz unter `0,45` (Kurven-NCC bis hinab zu `0,05`)
+
+|Fertiges Gesamt-Panorama
+|`7835 × 1420 px` (`78,35 cm` = `78,35 Min`)
+|`panorama.png` (`13,1 MB`) & `panorama.webp` (`2,1 MB`)
+
+|Extrahierte Vitalkurven (`1 Hz`, `4700 s`)
+|`FHF` Median `156,3 bpm` (`113–184,7`), `Puls` Median `80,3 bpm` (`67–98,7`)
+|Leer: `FHF` `7,0 %`, `Puls` `7,2 %`, `Toco` `2,5 %` der Sekunden (Vorlauf, Bildende, kurze Lücken)
+
+|Kurve auf der Druckfarbe (`±3 px`, ohne Ränder)
+|`FHF` `93,0 %`, `Puls` `96,7 %`, `Toco` `99,9 %`
+|Gemessen von `validate.py` auf der Schwarz-Ebene des Panoramas
+
+|Zeitstempel im Trennstreifen
+|8 Stempel; 10-Minuten-Abstände `969–1002 px` (Soll `1000`)
+|Größte Abweichung `31 px` (`19 s`) zwischen 12:00 und 12:10 Uhr
+
+|Gedrucktes Gitter gegen Kalibrierung
+|`FHF` höchstens `1 px`, `Toco` höchstens `1,5 px`
+|`1 px` entspricht `0,2 bpm`
+
+|Toco-Umrechnung
+|`0,1327 kPa` je Einheit aus den gedruckten kPa-Ziffern
+|Die Sitzung rechnet mit `0,1333` (`100 mmHg = 13,33 kPa`); die gedruckte `12` steht auf der 90er-Linie
+
+|Speicherbedarf (4-Kern-CPU, ohne GPU)
+|`389,7 MB` Peak-RSS (CLI) / `291 MB` (GUI)
+|Sequenzielles Streaming pro Bild statt Voll-RAM-Ladung
+|===
+====
+
+[[tests]]
+== Automatisierte Tests
+
+[source,bash]
+----
+QT_QPA_PLATFORM=offscreen .venv/bin/pytest -v
+----

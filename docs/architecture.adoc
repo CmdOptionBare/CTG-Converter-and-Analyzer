@@ -1,0 +1,133 @@
+= Technische Architektur: CTG-Bildpipeline, Panorama-Stitching & Bild-zu-Wert-Brücke
+:author: CTG Pipeline Team
+:revnumber: 0.1.0
+:revdate: 2026-11-22
+:toc: left
+:toclevels: 3
+:icons: font
+:experimental:
+:source-highlighter: highlight.js
+:sectnums:
+
+Dieses Dokument beschreibt die mathematische und softwaretechnische Architektur von `ctg_converter` sowie die Kopplung mit dem Web-Viewer unter `web/` (übernommen aus `CmdOptionBare/CTG-Project1`).
+
+[[geometrie]]
+== Physikalische Papier-Geometrie (`Philips M1911A`)
+
+Das Thermopapier `M1911A` besitzt bei Vorschubgeschwindigkeit `v = 1 cm/min` eine streng normierte Zweikanal-Geometrie, die als physikalischer Maßstabsanker für sämtliche Entzerrungs- und Extraktionsschritte dient:
+
+[cols="2,1,2,2",options="header"]
+|===
+|Papierzone |Höhe (`cm`) |Kanonische Pixel (`100 px/cm`) |Skalierung
+
+|Oberer Randstreifen
+|`0,800 cm`
+|`y = 0 .. 80 px`
+|Papierkante & Druckermarken
+
+|FHF-Gitter (`210 bpm` bis `50 bpm`)
+|`8,000 cm`
+|`y = 80 .. 880 px`
+|`32` Kästchen à `2,5 mm` = `5 bpm` (`5,0 px/bpm`)
+
+|Weißer Trennstreifen (Zeitstempel)
+|`0,675 cm`
+|`y = 880 .. 947,5 px`
+|Gitterfreie Zone (`11:10 .. 12:20, 1 cm/min`)
+
+|Toco-Gitter (`100` bis `0` Einheiten; gedruckte `12 kPa` auf der 90er-Linie)
+|`4,000 cm`
+|`y = 947,5 .. 1347,5 px`
+|`10` Intervalle à `4,0 mm` = `10 %` (`4,0 px/%`)
+
+|Unterer Randstreifen (`PHILIPS` / Blatt-Nr.)
+|`0,725 cm`
+|`y = 1347,5 .. 1420 px`
+|Blattnummern (`23` bis `33`)
+
+|2+|*Gesamthöhe kanonisch*
+|2+|*`14,200 cm` = `1420 px`* (Zeitachse `x`: `100 px = 1,0 cm = 60 s`)
+|===
+
+[[pipeline-1]]
+== Pipeline 1: Beleuchtungsnormalisierung & Farbtrennung (`enhance.py`)
+
+. **Mehrstufige Grob-Orientierung (`0°`, `90°`, `180°`, `270°`)**:
+  Auf einem herunterskalierten Vorschaubild wird zunächst der Feinwinkel modulo `90°` bestimmt. Anschließend bewertet ein Asymmetrie-Detektor das detrendierte grüne Zeilensignal anhand des weißen Mittelstreifens (`FHR` oben doppelt so hoch wie `Toco` unten) sowie der Randberührung des Papierbandes.
+. **Papier- & Fingermaskierung (`compute_valid_paper_mask`)**:
+  Dunkle Tischränder, Monitorhintergründe und am Rand ins Bild ragende Finger (erhöhte Sättigung/Hautfarbe am Bildrand) werden vor der Weiterverarbeitung ausmaskiert.
+. **Morphologische Flachfeld-Division & Kanaltrennung**:
+  Auf `1/4`-Auflösung schätzt ein großes morphologisches Closing das lokale Papierweiß `W(x, y)` trotz Falten und Lampenvignettierung. Nach Division auf Neutralweiß `250` trennt die Pipeline:
+  * `grid_layer`: Reine Grün-Absorption `(R, B)` relativ zu `G` (isoliertes Millimetergitter ohne schwarze Kurve).
+  * `trace_layer`: Grün-kompensierte Neutral-Absorption (isolierte schwarze FHF-, Puls-, Toco- und Textspuren *ohne* grünes Gitter).
+
+[[pipeline-2]]
+== Pipeline 2: Metrische 90°-Gitter-Entzerrung (`rectify.py`)
+
+CAUTION: Eine freie Verkettung paarweiser `3×3`-Homographien (`H~0,k~ = H~0,1~ · ... · H~k-1,k~`) führt bei längeren Streifen unweigerlich zu exponentiellem Skalierungs- und Trapez-Drift. Deshalb wird *jedes* Einzelbild unabhängig auf das exakte physikalische Kästchenmaß `{100 px/cm}` gebracht.
+
+* **Vertikaler 1D-Projektiv-Kamm (`_fit_projective_comb_1d`)**:
+  In überlappenden Spaltenfenstern wird das projektive Abbildungsgesetz
++
+----
+y(s) = y_sep + scale_sep * (s - s_sep) / (1 + k_persp * (s - s_sep))
+----
++
+simultan über alle `33` horizontalen FHF-Gitterlinien, den gitterfreien Trennstreifen (Negativstrafe) und alle `11` horizontalen Toco-Linien mittels FFT-Periodenschätzung eingepasst. Dadurch verschwindet vertikales Trapez-Kippen (_Keystone_) vollständig.
+* **Horizontale Trapez-Entfächerung (`_rectify_x_coordinate_field`)**:
+  Vertikale Gitterlinien konvergieren bei schräger Kamerahaltung nach oben oder unten (`dx/dy != 0`). Vier Höhenbänder messen per Phasenkorrelation die horizontale Scherung und lokale Kästchenbreite `P~x~(x)` und integrieren sie auf exakt `25,0 px` pro `2,5 mm`-Spalte.
+* **Single-Pass Remapping**:
+  Rotation, vertikales Projektiv-Profil und horizontale Entfächerung werden analytisch in *ein einziges* `(map_x, map_y)`-Feld komponiert und per `cv2.remap(..., cv2.INTER_CUBIC)` gerendert, sodass keine Mehrfach-Interpolationsunschärfe entsteht.
+
+[[pipeline-3]]
+== Pipeline 3: Hybrides Überlappungs-Matching & Seam-Cutting (`stitch.py`)
+
+Da `grid_layer` alle `25 px` exakt periodisch ist, erfolgt die Grobregistrierung ausschließlich auf der hochpassgefilterten `trace_layer`:
+
+[source,python]
+----
+# Horizontale Hochpassfilterung unterdrückt flache Toco-Basislinien bei dx = 0
+t1_hp = trace1.astype(np.float32) - cv2.GaussianBlur(trace1.astype(np.float32), (0, 0), sigmaX=24.0, sigmaY=1.0)
+ncc_map, ov_map = _masked_fft_ncc_2d(s_t1, s_m1, s_t2, s_m2) # <1>
+odx, ody, oconf, oinl = onnx_matcher.match_translation(trace1, mask1, trace2, mask2) # <2>
+----
+<1> Exakte maskierte 2D-FFT-Kreuzkorrelation nach Padfield über alle gültigen Überlappungen (`\|dy\| <= 10 px`).
+<2> Unabhängige Verifikation durch `models/tiny_ctg_patch_net.onnx` (`522 KB`, Opset 13, 3-Skalen-Gabor/Wavelet-Deskriptornetz auf `onnxruntime` `CPUExecutionProvider`) mit Mutual-Nearest-Neighbor-Matching und Translations-RANSAC.
+
+In der anschließenden `1 px`-Feinoptimierung sorgt die Phasenkorrelation von `grid_layer` dafür, dass die `25 px`-Kästchenlinien über den Stoß hinweg submillimetergenau weiterlaufen, während ein dynamisches Programmierungsverfahren (`_find_minimum_error_vertical_seam`) die Schnittnaht durch unbedrucktes Weißpapier um Kurven und Ziffern herumführt.
+
+NOTE: WebP besitzt im Formatstandard ein hartes Limit von `16.383 px` Kantenlänge (`WEBP_MAX_DIMENSION_PX`). Überschreitet ein mehrstündiger CTG-Streifen diese Breite, skaliert `stitch.py` den WebP-Export automatisch proportional in das gültige Fenster und protokolliert `webp_scale_factor` in `stitch_metadata.json`, während `panorama.png` stets in voller `1:1`-Auflösung erhalten bleibt.
+
+[[bridge-ctg-project1]]
+== Pipeline 4, Web-Viewer und Prüfung (`extract.py`, `web_export.py`, `validate.py`)
+
+=== Ausgangslage der beiden Teilprojekte
+
+[cols="1,2,2",options="header"]
+|===
+|Aspekt |`CmdOptionBare/CTG-Converter-and-Analyzer` (dieses Repo) |`CmdOptionBare/CTG-Project1` (`CTG BLATT`)
+
+|Stärke
+|Präzise Bildvorverarbeitung, 90°-Entzerrung, Panorama-Stitching, PySide6-Inspektor & kalibriertes Viterbi-Kurven-Tracking
+|Moderne React/TypeScript-Darstellung (`station.tsx`, `paper.tsx`), 10-Minuten-Fensterstatistik (`analyze.ts`: Basislinie, Bandbreite `p10–p90`, Anstiege/Abfälle)
+
+|Bisherige Lücke
+|Reine Desktop-/CLI-Verarbeitung ohne Web-Präsentationsschicht
+|`pipeline/reading.json` & `build_session.py` nutzten handgeschätzte Stützstellen statt echter Bild-zu-Wert-Extraktion
+|===
+
+=== Funktionsweise von `extract.py` und `export-web`
+
+1. **Komponentengewichtete Textunterdrückung**:
+   Auf `panorama_trace.png` trennt eine Zusammenhangskomponenten-Analyse (`cv2.connectedComponentsWithStats`) durchgehende Kurvenbänder (`Breite >= 38 px`) von kompakten gedruckten Skalenbeschriftungen (`200`, `180`, `60`, `Puls 83`), sodass Beschriftungen die Kurvenverfolgung nicht ablenken.
+2. **Zweistufiges globales Viterbi-Tracking (`FHF`, `Puls`, `Toco`)**:
+   * Ist im unteren FHF-Bereich (`58–112 bpm`) eine kontinuierliche mütterliche Pulsspur vorhanden, verfolgt ein stark regularisierter Viterbi-Pfad zuerst `y~mhr~(x)`, blendet dessen `±2,2 bpm`-Korridor aus und verfolgt anschließend `y~fhr~(x)` über den gesamten `50–210 bpm`-Bereich (inklusive tiefer Dezelerationen).
+   * Im Toco-Kanal erkennt `_detect_kineto_events` gedruckte Kindsbewegungs-Balken am oberen Toco-Rand als `CtgEvent`-Einträge und verfolgt darunter die Wehenkurve `y~toco~(x)`.
+3. **Lücken statt erfundener Werte**:
+   Spalten ohne Druckfarbe innerhalb von `±3 px` um den verfolgten Pfad werden `null`, sofern die Lücke länger als `8 px` ist. Ebenso der Anfang, solange der Pfad auf einer Gitterlinie liegt, und Strecken, in denen die Toco-Linie länger als `20 px` auf der Nulllinie verweilt.
+4. **Uhrzeit**:
+   Der Rekorder druckt die Startzeit sekundengenau in den senkrechten Kopf und stempelt den Trennstreifen zur nächsten vollen Minute. `startedAt` ist die daraus berechnete Uhrzeit am linken Bildrand; `recordingStartedAt` bleibt die Kopfzeit.
+5. **Übergabe an den Web-Viewer (`web_export.py`)**:
+   `export_to_web_app()` prüft Längen und Zahlen der Sitzung und schreibt `src/data/ctg/<session_id>.json` mit dem Block `panorama` (Bildgröße, `px/cm`, Zeilen der 210- und 50-bpm-Linie sowie der 100er- und 0er-Linie), dazu `panorama.webp`, `trace.csv` und `events.csv` nach `public/ctg/<session_id>/`. Der Viewer zeichnet Gitter und Kurven aus diesen Angaben und wiederholt keine Papiermaße.
+6. **Prüfung gegen das Papier (`validate.py`)**:
+   `run_validation()` misst ohne Rückgriff auf die Konfidenzwerte des Stitchings: Abstände der Zeitstempel im Trennstreifen, Lage der gedruckten Gitterlinien, Abstand der gedruckten kPa-Ziffern und den Anteil der Kurvenpunkte auf Druckfarbe. Ergebnis ist `validation_report.json`.

@@ -1,0 +1,251 @@
+{
+  "dataset_id": "2026-11-22_philips_ctg_001",
+  "split": "test",
+  "source_type": "camera_sequence",
+  "device_vendor": "Philips",
+  "device_model": "M2702A / M1911A",
+  "paper_speed_cm_per_min": 1.0,
+  "fhr_range_bpm": [
+    60,
+    200
+  ],
+  "toco_range_units": [
+    0,
+    100
+  ],
+  "target_px_per_cm": 100,
+  "notes": "Initial 21-frame handheld camera test dataset of a Philips CTG strip (1 cm/min).",
+  "frames": [
+    {
+      "index": 1,
+      "filename": "frame_0001.png",
+      "original_filename": "2026-11-22-12-22-30-821.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:30.821",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 2,
+      "filename": "frame_0002.png",
+      "original_filename": "2026-11-22-12-22-34-492.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:34.492",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 3,
+      "filename": "frame_0003.png",
+      "original_filename": "2026-11-22-12-22-36-871.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:36.871",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 4,
+      "filename": "frame_0004.png",
+      "original_filename": "2026-11-22-12-22-39-571.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:39.571",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 5,
+      "filename": "frame_0005.png",
+      "original_filename": "2026-11-22-12-22-41-934.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:41.934",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 6,
+      "filename": "frame_0006.png",
+      "original_filename": "2026-11-22-12-22-45-600.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:45.600",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 7,
+      "filename": "frame_0007.png",
+      "original_filename": "2026-11-22-12-22-49-663.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:49.663",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 8,
+      "filename": "frame_0008.png",
+      "original_filename": "2026-11-22-12-22-51-910.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:51.910",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 9,
+      "filename": "frame_0009.png",
+      "original_filename": "2026-11-22-12-22-54-318.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:54.318",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 10,
+      "filename": "frame_0010.png",
+      "original_filename": "2026-11-22-12-22-57-026.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:57.026",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 11,
+      "filename": "frame_0011.png",
+      "original_filename": "2026-11-22-12-22-59-065.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:22:59.065",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 12,
+      "filename": "frame_0012.png",
+      "original_filename": "2026-11-22-12-23-01-871.png",
+      "width": 3000,
+      "height": 4000,
+      "capture_timestamp_hint": "2026-11-22T12:23:01.871",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 13,
+      "filename": "frame_0013.png",
+      "original_filename": "2026-11-22-12-23-05-354.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:05.354",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 14,
+      "filename": "frame_0014.png",
+      "original_filename": "2026-11-22-12-23-07-791.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:07.791",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 15,
+      "filename": "frame_0015.png",
+      "original_filename": "2026-11-22-12-23-10-415.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:10.415",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 16,
+      "filename": "frame_0016.png",
+      "original_filename": "2026-11-22-12-23-12-967.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:12.967",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 17,
+      "filename": "frame_0017.png",
+      "original_filename": "2026-11-22-12-23-15-555.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:15.555",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 18,
+      "filename": "frame_0018.png",
+      "original_filename": "2026-11-22-12-23-19-550.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:19.550",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 19,
+      "filename": "frame_0019.png",
+      "original_filename": "2026-11-22-12-23-22-071.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:22.071",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 20,
+      "filename": "frame_0020.png",
+      "original_filename": "2026-11-22-12-23-24-616.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:24.616",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    },
+    {
+      "index": 21,
+      "filename": "frame_0021.png",
+      "original_filename": "2026-11-22-12-23-27-095.png",
+      "width": 4000,
+      "height": 3000,
+      "capture_timestamp_hint": "2026-11-22T12:23:27.095",
+      "rotation_override_deg": null,
+      "manual_dx_override": null,
+      "manual_dy_override": null
+    }
+  ]
+}

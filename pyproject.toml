@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctg-converter-and-analyzer"
+version = "0.1.0"
+description = "Memory- and CPU-efficient CTG paper strip enhancement, 90-degree grid rectification, and panorama stitching pipeline with PySide6 visual tools."
+readme = {file = "README.adoc", content-type = "text/plain"}
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26,<3.0",
+    "scipy>=1.11",
+    "opencv-python-headless>=4.9",
+    "Pillow>=10.2",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6",
+]
+onnx = [
+    "onnxruntime>=1.17",
+]
+dev = [
+    "pytest>=8.0",
+]
+all = [
+    "PySide6>=6.6",
+    "onnxruntime>=1.17",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+ctg-tool = "ctg_converter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

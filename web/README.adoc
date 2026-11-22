@@ -9,6 +9,31 @@ Der **CTG Blatt**-Viewer im Ordner `web/` zeigt Aufnahmen von CTG-Papierfotos im
 Dies ist keine medizinische Diagnose und kein Medizinprodukt — nur eine persönliche Ablesung zur Orientierung.
 ====
 
+== Analyse
+
+Neben dem Streifen unter `/` gibt es eine eigene statistische Ansicht unter `/analyse`. Sie liest dieselbe Sitzungsliste (`web/src/data/sessions.ts`) und ist im Code getrennt:
+
+* `web/src/routes/analyse.tsx`
+* `web/src/components/ctg-analysis/`
+* `web/src/lib/ctg-analysis/`
+
+Vom Streifen führt „Analyse“ nach `/analyse`, von der Analyse „Streifen“ zurück nach `/`.
+
+Drei Ebenen:
+
+* *Gesamt* — die ganze Aufnahme
+* *Fenster* — gleitend, wählbar 5, 10 oder 15 Minuten, Schritt 2 Minuten
+* *Ereignisse* — Fenster um jede Dezeleration und, falls die Serie sie hergibt, um jede Wehe
+
+Gerechnet werden Lage und Streuung (Median, getrimmtes Mittel 10 %, Mittel, Standardabweichung, Variationskoeffizient, IQR, p10, p90, Schiefe, Exzess-Kurtosis, Lückenanteil), eine Amplitudenklasse im Sinne von NICHD (fehlend, minimal, mäßig, ausgeprägt), Shannon-Entropie in 10-bpm-Klassen, ein LZ77-Verhältnis als Ersatz für gzip, Steigungen, Dezelerationen (mindestens 15 s und 15 bpm unter dem Median der Aufnahme), Wehen (mindestens 8 Einheiten über dem Toco-Median und 20 s), die Kreuzkorrelation FHF–Toco für Lags von −60 bis +120 s, die Korrelation FHF–Puls bei Lag 0 und die Autokorrelation der FHF bis 60 s.
+
+`gzipRatio` ist kein gzip. `CompressionStream` ist asynchron, daher teilt der Code die Länge einer festen LZ77-Kodierung (Fenster 64, Literal 9 bit, Treffer 11 bit) durch die Rohfolge. Ein kleineres Verhältnis bedeutet ein starreres Signal. Nullwerte werden ausgelassen; jeder gültige FHF-Wert wird auf 50 bis 210 bpm begrenzt und als Byte `Wert − 50` gespeichert.
+
+[NOTE]
+====
+Nicht berechnet: STV und Dawes-Redman in Millisekunden, das LF/HF-Spektrum, Sample-Entropy und PRSA. Die Abtastung dieser Papieraufzeichnung ist 1 Hz bei 1 cm/min; diese Verfahren brauchen eine feinere Auflösung. Die Ansicht ist keine Diagnose und kein Medizinprodukt.
+====
+
 == Zusammenspiel mit der Python-Pipeline
 
 Die Anwendung liest **keine Rohfotos** direkt ein. Sichtbare Daten und Assets kommen aus dem Export der Pipeline im Repository-Root:

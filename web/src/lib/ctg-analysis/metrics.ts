@@ -24,7 +24,7 @@ export const RADAR = {
   iqrBpm: 40,
   gzipLow: 0.1,
   gzipHigh: 1,
-  aucBpmSec: 6000,
+  aucBpmSec: 12000,
   recoveryBpmPerSec: 1,
   corr: 0.6,
 } as const;

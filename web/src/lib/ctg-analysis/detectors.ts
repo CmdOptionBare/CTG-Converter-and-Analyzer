@@ -134,26 +134,44 @@ function nearestTocoPeak(
 ): { t: number; value: number } | null {
   const tLo = troughT - TOCO_LOOKBACK_SEC;
   const tHi = troughT + TOCO_LOOKAHEAD_SEC;
-  let best: { t: number; value: number } | null = null;
-  let bestDist = Infinity;
   const n = toco.length;
   const i0 = Math.max(0, Math.ceil(tLo / dt));
   const i1 = Math.min(n - 1, Math.floor(tHi / dt));
+  const windowValues: number[] = [];
+  for (let i = i0; i <= i1; i++) {
+    if (isSample(toco[i])) windowValues.push(toco[i] as number);
+  }
+  const med = median(windowValues);
+  if (med == null) return null;
+  // A flat trace has an argmax, but not a peak. Require a local rise.
+  const level = med + 2;
+  let best: { t: number; value: number } | null = null;
+  let bestDist = Infinity;
   for (let i = i0; i <= i1; i++) {
     const v = toco[i];
-    if (!isSample(v)) continue;
+    if (!isSample(v) || v < level || !isLocalPeak(toco, i)) continue;
     const t = i * dt;
     const dist = Math.abs(t - troughT);
     if (
       best == null ||
-      v > best.value + 1e-9 ||
-      (Math.abs(v - best.value) <= 1e-9 && (dist < bestDist - 1e-9 || (Math.abs(dist - bestDist) <= 1e-9 && t < best.t)))
+      dist < bestDist - 1e-9 ||
+      (Math.abs(dist - bestDist) <= 1e-9 && (v > best.value + 1e-9 || (Math.abs(v - best.value) <= 1e-9 && t < best.t)))
     ) {
       best = { t, value: v };
       bestDist = dist;
     }
   }
   return best;
+}
+
+function isLocalPeak(toco: readonly CtgSample[], index: number): boolean {
+  const v = toco[index];
+  if (!isSample(v)) return false;
+  const left = index > 0 ? toco[index - 1] : null;
+  const right = index + 1 < toco.length ? toco[index + 1] : null;
+  const aboveLeft = !isSample(left) || v > (left as number);
+  const atLeastRight = !isSample(right) || v >= (right as number);
+  return aboveLeft && atLeastRight;
 }
 
 /**

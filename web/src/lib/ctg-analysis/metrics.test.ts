@@ -156,6 +156,15 @@ describe("decelerations", () => {
     assert.equal(event.tocoPeakT, 5);
     assert.equal(event.lagSec, 5);
   });
+
+  it("does not invent a toco peak on a flat line", () => {
+    const fhr = Array.from({ length: 40 }, () => 150);
+    for (let i = 10; i < 25; i++) fhr[i] = 100;
+    const toco = Array.from({ length: 40 }, () => 20);
+    const [event] = detectDecelerations(fhr, toco, 1, 150);
+    assert.equal(event.tocoPeakT, null);
+    assert.equal(event.lagSec, null);
+  });
 });
 
 describe("toco events", () => {
@@ -257,7 +266,7 @@ describe("slopes, gaps, windows and radar", () => {
       driftBpm: 45,
       iqr: 80,
       gzipRatio: 1.2,
-      totalAuc: 9000,
+      totalAuc: 12000,
       meanRecovery: 2,
       bestAbsR: 0.9,
       decelCount: 1,

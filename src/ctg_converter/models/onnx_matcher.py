@@ -235,12 +235,12 @@ class OnnxPatchMatcher:
         self, trace_u8: np.ndarray, mask_u8: np.ndarray, max_kpts: int = 260
     ) -> tuple[np.ndarray, np.ndarray]:
         """Detect corners/curve features on trace_u8 and extract 64-D ONNX descriptors."""
-        eroded = cv2.erode(mask_u8, np.ones((21, 21), dtype=np.uint8))
+        eroded = cv2.erode(mask_u8, np.ones((25, 25), dtype=np.uint8))
         pts = cv2.goodFeaturesToTrack(
             trace_u8,
             maxCorners=max_kpts,
-            qualityLevel=0.04,
-            minDistance=14,
+            qualityLevel=0.015,
+            minDistance=12,
             mask=eroded,
             blockSize=7,
         )

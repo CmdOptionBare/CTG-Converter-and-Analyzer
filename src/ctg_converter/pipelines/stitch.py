@@ -178,12 +178,28 @@ def match_rectified_pair(
     onnx_matcher: OnnxPatchMatcher | None = None,
 ) -> dict[str, Any]:
     """Estimate exact translation (dx, dy) placing frame 2 relative to frame 1."""
+    # Erode masks slightly for correlation to reject any border cut-edge fringes,
+    # and apply horizontal high-pass so flat Toco baselines don't bias dx toward 0!
+    k_erode = np.ones((15, 29), dtype=np.uint8)
+    m1_clean = cv2.erode(mask1, k_erode)
+    m2_clean = cv2.erode(mask2, k_erode)
+    t1_hp = np.clip(
+        trace1.astype(np.float32) - cv2.GaussianBlur(trace1.astype(np.float32), (0, 0), sigmaX=24.0, sigmaY=1.0),
+        -255.0,
+        255.0,
+    )
+    t2_hp = np.clip(
+        trace2.astype(np.float32) - cv2.GaussianBlur(trace2.astype(np.float32), (0, 0), sigmaX=24.0, sigmaY=1.0),
+        -255.0,
+        255.0,
+    )
+
     # Downsample 2x for fast global Masked FFT NCC across all valid shifts
     ds = 2
-    s_t1 = cv2.resize(trace1, (trace1.shape[1] // ds, trace1.shape[0] // ds), interpolation=cv2.INTER_AREA)
-    s_m1 = cv2.resize(mask1, (mask1.shape[1] // ds, mask1.shape[0] // ds), interpolation=cv2.INTER_NEAREST)
-    s_t2 = cv2.resize(trace2, (trace2.shape[1] // ds, trace2.shape[0] // ds), interpolation=cv2.INTER_AREA)
-    s_m2 = cv2.resize(mask2, (mask2.shape[1] // ds, mask2.shape[0] // ds), interpolation=cv2.INTER_NEAREST)
+    s_t1 = cv2.resize(t1_hp, (trace1.shape[1] // ds, trace1.shape[0] // ds), interpolation=cv2.INTER_AREA)
+    s_m1 = cv2.resize(m1_clean, (mask1.shape[1] // ds, mask1.shape[0] // ds), interpolation=cv2.INTER_NEAREST)
+    s_t2 = cv2.resize(t2_hp, (trace2.shape[1] // ds, trace2.shape[0] // ds), interpolation=cv2.INTER_AREA)
+    s_m2 = cv2.resize(m2_clean, (mask2.shape[1] // ds, mask2.shape[0] // ds), interpolation=cv2.INTER_NEAREST)
 
     ncc_map, ov_map = _masked_fft_ncc_2d(s_t1, s_m1, s_t2, s_m2)
     sh1, sw1 = s_t1.shape
@@ -256,10 +272,10 @@ def match_rectified_pair(
                 if (cx, cy) in evaluated:
                     continue
                 evaluated.add((cx, cy))
-                tncc, ov_w = _eval_fullres_overlap(trace1, mask1, trace2, mask2, cx, cy)
+                tncc, ov_w = _eval_fullres_overlap(t1_hp, m1_clean, t2_hp, m2_clean, cx, cy)
                 if ov_w < cfg.min_overlap_px or tncc < -0.5:
                     continue
-                gncc, _ = _eval_fullres_overlap(grid1, mask1, grid2, mask2, cx, cy)
+                gncc, _ = _eval_fullres_overlap(grid1, m1_clean, grid2, m2_clean, cx, cy)
                 # Bonus if ONNX RANSAC agrees within 8 px!
                 onnx_bonus = 0.0
                 if onnx_dx is not None and abs(cx - onnx_dx) <= 8.0 and abs(cy - (onnx_dy or 0.0)) <= 6.0:
@@ -272,10 +288,10 @@ def match_rectified_pair(
         _, bx, by, _, _, _ = local_best
         for cy in range(max(-cfg.max_abs_dy_px, by - 2), min(cfg.max_abs_dy_px, by + 2) + 1):
             for cx in range(bx - 2, bx + 3):
-                tncc, ov_w = _eval_fullres_overlap(trace1, mask1, trace2, mask2, cx, cy)
+                tncc, ov_w = _eval_fullres_overlap(t1_hp, m1_clean, t2_hp, m2_clean, cx, cy)
                 if ov_w < cfg.min_overlap_px:
                     continue
-                gncc, _ = _eval_fullres_overlap(grid1, mask1, grid2, mask2, cx, cy)
+                gncc, _ = _eval_fullres_overlap(grid1, m1_clean, grid2, m2_clean, cx, cy)
                 onnx_bonus = 0.0
                 used = m_name
                 if onnx_dx is not None and abs(cx - onnx_dx) <= 8.0 and abs(cy - (onnx_dy or 0.0)) <= 6.0:

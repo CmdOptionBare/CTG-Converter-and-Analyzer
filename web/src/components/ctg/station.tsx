@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Download, Minus, Plus } from "lucide-react";
 import { sessions } from "@/data/sessions";
-import { clockOf, toCsv, windowStats } from "@/lib/ctg/analyze";
+import { clockOf, formatSample, tocoKpa, toCsv, windowStats } from "@/lib/ctg/analyze";
 import { CtgPaper } from "@/components/ctg/paper";
 
 const ZOOMS = [18, 26, 36];
@@ -11,21 +11,33 @@ export function Station() {
   const session = sessions.find((s) => s.id === sessionId) ?? sessions[0];
   const [zoom, setZoom] = useState(1);
   const [showPhoto, setShowPhoto] = useState(false);
-  const [opacity, setOpacity] = useState(0.42);
-  const [shift, setShift] = useState(0);
+  const [opacity, setOpacity] = useState(0.55);
   const [showFhr, setShowFhr] = useState(true);
   const [showMhr, setShowMhr] = useState(true);
   const [showToco, setShowToco] = useState(true);
   const [tab, setTab] = useState<"streifen" | "werte" | "pipeline">("streifen");
   const [cursor, setCursor] = useState<number | null>(null);
-  const [jump, setJump] = useState<number | undefined>(undefined);
+  const [jump, setJump] = useState<{ t: number; n: number } | undefined>(undefined);
+  const [scanFile, setScanFile] = useState(session.scans[0]?.file ?? "");
+
+  const firstScan = session.scans[0]?.file ?? "";
+  useEffect(() => {
+    setScanFile(firstScan);
+    setCursor(null);
+    setJump(undefined);
+  }, [session.id, firstScan]);
 
   const px = ZOOMS[zoom];
   const t = cursor ?? 0;
-  const i = Math.min(session.fhr.length - 1, Math.max(0, Math.round(t / session.dt)));
+  const i = session.fhr.length
+    ? Math.min(session.fhr.length - 1, Math.max(0, Math.round(t / session.dt)))
+    : -1;
   const stats = useMemo(() => windowStats(session), [session]);
-  const frontal = session.scans.filter((s) => s.file.includes("-12-22-"));
-  const [scanFile, setScanFile] = useState(frontal[0]?.file ?? "");
+  const factor = session.tocoKpaPerPct;
+  const fhrNow = i >= 0 ? session.fhr[i] : null;
+  const mhrNow = i >= 0 ? session.mhr[i] : null;
+  const tocoNow = i >= 0 ? session.tocoPct[i] : null;
+  const tocoKpaNow = tocoKpa(tocoNow, factor);
 
   function download() {
     const blob = new Blob([toCsv(session)], { type: "text/csv" });
@@ -35,6 +47,10 @@ export function Station() {
     a.download = `ctg-${session.id}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function go(sec: number) {
+    setJump({ t: sec, n: Date.now() });
   }
 
   return (
@@ -65,9 +81,13 @@ export function Station() {
 
       <div className="flex gap-2 overflow-x-auto border-b border-line px-3 py-2">
         <Readout label="Zeit" value={clockOf(session.startedAt, cursor ?? 0)} />
-        <Readout label="FHF" value={showFhr ? String(Math.round(session.fhr[i])) : "–"} unit="bpm" />
-        <Readout label="Puls" value={showMhr ? String(Math.round(session.mhr[i])) : "–"} unit="bpm" accent />
-        <Readout label="Toco" value={showToco ? session.toco[i].toFixed(1) : "–"} unit="kPa" />
+        <Readout label="FHF" value={showFhr ? formatSample(fhrNow, 0) : "–"} unit="bpm" />
+        <Readout label="Puls" value={showMhr ? formatSample(mhrNow, 0) : "–"} unit="bpm" accent />
+        <Readout
+          label="Toco"
+          value={showToco ? formatSample(tocoNow, 1) : "–"}
+          hint={showToco && tocoKpaNow != null ? `${tocoKpaNow.toFixed(1)} kPa` : undefined}
+        />
       </div>
 
       <div className={tab === "streifen" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
@@ -77,13 +97,12 @@ export function Station() {
             pxPerCm={px}
             showPhoto={showPhoto}
             photoOpacity={opacity}
-            shiftSec={shift}
             showFhr={showFhr}
             showMhr={showMhr}
             showToco={showToco}
-            activeScan={showPhoto ? scanFile : null}
             onCursor={setCursor}
-            scrollToSec={jump}
+            scrollToSec={jump?.t}
+            scrollToken={jump?.n}
           />
         </div>
         <div className="flex gap-1 overflow-x-auto border-t border-line px-3 py-2">
@@ -91,7 +110,7 @@ export function Station() {
             <button
               key={m}
               type="button"
-              onClick={() => setJump(m * 60 + (jump === m * 60 ? 0.01 : 0))}
+              onClick={() => go(m * 60)}
               className="shrink-0 rounded-card border border-line px-2 py-1 font-mono text-xs text-paper/80"
             >
               {clockOf(session.startedAt, m * 60).slice(0, 5)}
@@ -113,7 +132,7 @@ export function Station() {
                   <th className="py-2 pr-3 font-medium">Anstiege</th>
                   <th className="py-2 pr-3 font-medium">Abfälle</th>
                   <th className="py-2 pr-3 font-medium">Puls</th>
-                  <th className="py-2 font-medium">Toco</th>
+                  <th className="py-2 font-medium">Toco 0–100</th>
                 </tr>
               </thead>
               <tbody>
@@ -122,14 +141,14 @@ export function Station() {
                     <td className="py-2 pr-3">
                       {clockOf(session.startedAt, w.t0).slice(0, 5)}–{clockOf(session.startedAt, w.t1).slice(0, 5)}
                     </td>
-                    <td className="py-2 pr-3">{w.baseline}</td>
+                    <td className="py-2 pr-3">{w.baseline == null ? "–" : w.baseline}</td>
                     <td className="py-2 pr-3">
-                      {w.low}–{w.high} ({w.band})
+                      {w.low == null || w.high == null ? "–" : `${w.low}–${w.high} (${w.band})`}
                     </td>
                     <td className="py-2 pr-3">{w.rises}</td>
                     <td className="py-2 pr-3">{w.falls}</td>
-                    <td className="py-2 pr-3">{w.mhr}</td>
-                    <td className="py-2">{w.toco.toFixed(1)}</td>
+                    <td className="py-2 pr-3">{w.mhr == null ? "–" : w.mhr}</td>
+                    <td className="py-2">{tocoCell(w.toco, factor)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -137,12 +156,13 @@ export function Station() {
           </div>
           <p className="mt-3 max-w-2xl text-xs text-paper/60">
             Anstieg: mindestens 15 Schläge über der Basis, mindestens 15 Sekunden. Abfall entsprechend darunter.
-            Gerechnet nur aus der Serie, nicht aus dem Foto.
+            Fehlende Stellen zählen nicht mit. Gerechnet nur aus der Serie, nicht aus dem Foto. Toco ist die
+            Skala 0 bis 100. Ein kPa-Wert steht nur daneben, wenn die Aufnahme einen Umrechnungsfaktor enthält.
           </p>
           <h2 className="mb-2 mt-6 text-sm font-medium">Aufdruck auf dem Papier</h2>
           <ul className="space-y-1 font-mono text-sm">
-            {session.events.map((e) => (
-              <li key={e.t + e.text}>
+            {session.events.map((e, n) => (
+              <li key={`${e.t}-${n}`}>
                 <span className="text-paper/60">{clockOf(session.startedAt, e.t).slice(0, 5)}</span> {e.text}
               </li>
             ))}
@@ -175,49 +195,39 @@ export function Station() {
         <Toggle on={showPhoto} onClick={() => setShowPhoto((v) => !v)}>
           Original
         </Toggle>
-        {showPhoto && frontal.length > 0 && (
-          <>
-            <select
-              className="max-w-[11rem] rounded-card border border-line bg-raised px-2 py-2 text-xs text-paper"
-              value={scanFile}
-              onChange={(e) => {
-                const file = e.target.value;
-                setScanFile(file);
-                const scan = frontal.find((s) => s.file === file);
-                if (scan) setJump(scan.t0 + (jump === scan.t0 ? 0.01 : 0));
-              }}
-              aria-label="Foto"
-            >
-              {frontal.map((s) => (
-                <option key={s.file} value={s.file}>
-                  {clockOf(session.startedAt, s.t0).slice(0, 5)}–{clockOf(session.startedAt, s.t1).slice(0, 5)}
-                </option>
-              ))}
-            </select>
-            <label className="flex items-center gap-2 text-xs text-paper/70">
-              Deckkraft
-              <input
-                type="range"
-                min={0.15}
-                max={0.8}
-                step={0.05}
-                value={opacity}
-                onChange={(e) => setOpacity(Number(e.target.value))}
-              />
-            </label>
-            <label className="flex items-center gap-2 text-xs text-paper/70">
-              Lage {shift > 0 ? "+" : ""}
-              {shift}s
-              <input
-                type="range"
-                min={-90}
-                max={90}
-                step={1}
-                value={shift}
-                onChange={(e) => setShift(Number(e.target.value))}
-              />
-            </label>
-          </>
+        {session.scans.length > 0 && (
+          <select
+            className="max-w-[16rem] rounded-card border border-line bg-raised px-2 py-2 text-xs text-paper"
+            value={scanFile}
+            onChange={(e) => {
+              const file = e.target.value;
+              setScanFile(file);
+              const scan = session.scans.find((s) => s.file === file);
+              if (scan) go(scan.t0);
+            }}
+            aria-label="Bild"
+          >
+            {session.scans.map((s, n) => (
+              <option key={`${s.file}-${n}`} value={s.file}>
+                {String(n + 1).padStart(2, "0")} {clockOf(session.startedAt, s.t0).slice(0, 5)}–
+                {clockOf(session.startedAt, s.t1).slice(0, 5)} · {s.trust}
+              </option>
+            ))}
+          </select>
+        )}
+        {showPhoto && (
+          <label className="flex items-center gap-2 text-xs text-paper/70">
+            Deckkraft
+            <input
+              type="range"
+              min={0.15}
+              max={1}
+              step={0.05}
+              value={opacity}
+              onChange={(e) => setOpacity(Number(e.target.value))}
+              aria-label="Deckkraft"
+            />
+          </label>
         )}
         <span className="flex-1" />
         <button
@@ -236,7 +246,11 @@ export function Station() {
         >
           <Plus size={16} />
         </button>
-        <button type="button" className="flex items-center gap-2 rounded-card bg-copper px-3 py-2 text-sm text-ink" onClick={download}>
+        <button
+          type="button"
+          className="flex items-center gap-2 rounded-card bg-copper px-3 py-2 text-sm text-ink"
+          onClick={download}
+        >
           <Download size={16} />
           CSV
         </button>
@@ -245,13 +259,33 @@ export function Station() {
   );
 }
 
-function Readout({ label, value, unit, accent }: { label: string; value: string; unit?: string; accent?: boolean }) {
+function tocoCell(pct: number | null, factor: number | undefined): string {
+  if (pct == null) return "–";
+  const kpa = tocoKpa(pct, factor);
+  const text = pct.toFixed(1);
+  return kpa == null ? text : `${text} (${kpa.toFixed(1)} kPa)`;
+}
+
+function Readout({
+  label,
+  value,
+  unit,
+  hint,
+  accent,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  hint?: string;
+  accent?: boolean;
+}) {
   return (
     <div className="min-w-24 rounded-card bg-raised px-3 py-2">
       <div className="text-xs text-paper/55">{label}</div>
       <div className={accent ? "font-mono text-lg text-copper" : "font-mono text-lg"}>
         {value}
-        {unit && <span className="ml-1 text-xs text-paper/50">{unit}</span>}
+        {unit && value !== "–" && <span className="ml-1 text-xs text-paper/50">{unit}</span>}
+        {hint && value !== "–" && <span className="ml-1 text-xs text-paper/50">{hint}</span>}
       </div>
     </div>
   );
@@ -263,9 +297,7 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
       type="button"
       onClick={onClick}
       className={
-        active
-          ? "rounded-card bg-paper px-3 py-2 text-sm text-ink"
-          : "rounded-card px-3 py-2 text-sm text-paper/70"
+        active ? "rounded-card bg-paper px-3 py-2 text-sm text-ink" : "rounded-card px-3 py-2 text-sm text-paper/70"
       }
     >
       {children}
@@ -291,22 +323,38 @@ function Toggle({ on, onClick, children }: { on: boolean; onClick: () => void; c
 }
 
 const STEPS = [
-  ["Sichten, ordnen, Uhrzeiten", "KI", "Einmal pro Aufnahme. Steht in der Lesung, nicht im Bild."],
-  ["Blatt aufrichten", "Rechner", "Logo unten, Raster gerade. Kein Modell."],
-  ["Minuten mit Überlappung", "Rechner", "Eine Minute ist ein Zentimeter. Der Schalter Original legt das Foto darauf."],
-  ["Kurve lesen", "KI, später ein kleines Modell", "Jetzt Keyframes. Ein nachtrainiertes Modell kann dieselbe Datei füllen."],
-  ["Serie und CSV", "Rechner", "Eine Zeile pro Sekunde. Die Seite liest nur das."],
-  ["Blatt zeichnen", "Rechner", "Gleiches Kästchenmaß wie das Papier, 20 Schläge und 2 kPa pro Zentimeter."],
-  ["Gegencheck", "Mensch", "Original einblenden, Lage schieben, ob die Linie sitzt."],
-  ["Kennzahlen", "Rechner", "Nur aus der Serie. Weitere Rechnungen kommen dazu, ohne die Bilder anzufassen."],
+  ["Fotos ordnen", "Mensch", "Die Aufnahmen einer Rolle in zeitlicher Reihenfolge. Daraus wird ein Datensatz."],
+  ["Bild aufbereiten", "Rechner", "Belichtung glätten, grünes Raster und dunkle Kurve trennen. Kein Modell."],
+  [
+    "Blatt entzerren",
+    "Rechner",
+    "Das Raster wird auf 90 Grad und auf 100 Pixel pro Zentimeter gezogen. Philips M1911A, ein Zentimeter je Minute.",
+  ],
+  ["Panorama fügen", "Rechner", "Überlappung messen und die Bilder zu einem Streifen zusammensetzen."],
+  [
+    "Kurven folgen",
+    "Rechner",
+    "FHF, Puls und Toco als Linie auf dem Panorama, eine Zahl pro Sekunde. Keine KI, keine abgelesenen Stützstellen.",
+  ],
+  ["Serie schreiben", "Rechner", "JSON und CSV. Diese Seite liest nur die Serie und das Panorama."],
+  [
+    "Blatt zeichnen",
+    "Rechner",
+    "Dieselben Maße wie das Papier: 8 cm für 50 bis 210 Schläge, 4 cm für die Toco-Skala 0 bis 100, ein Zentimeter je Minute.",
+  ],
+  [
+    "Gegencheck",
+    "Mensch",
+    "Original einblenden. Die gezeichnete Linie soll auf der Druckfarbe liegen, das Raster auf dem fotografierten Raster.",
+  ],
 ];
 
 function Pipeline() {
   return (
     <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
       <p className="mb-4 max-w-2xl text-sm text-paper/75">
-        Neue CTGs kommen als weitere Aufnahme dazu. Bilderkennung und Zeichnung bleiben getrennt:
-        die Seite kennt nur die Serie. Was eine KI gelesen hat, kann eine andere KI später überschreiben.
+        Neue Aufnahmen kommen aus der Bildpipeline dazu. Entzerren, Zusammenfügen und Ablesen sind festgelegt; eine
+        KI liest keine Stützstellen. Die Seite zeichnet nur, was die Pipeline geschrieben hat.
       </p>
       <ol className="max-w-2xl space-y-3">
         {STEPS.map(([title, who, text], n) => (

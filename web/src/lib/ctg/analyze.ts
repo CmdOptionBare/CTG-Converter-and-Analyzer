@@ -1,37 +1,67 @@
-import type { CtgSession } from "@/lib/ctg/types";
+import type { CtgSample, CtgSession } from "@/lib/ctg/types";
 
 export type WindowStats = {
   t0: number;
   t1: number;
-  baseline: number;
-  low: number;
-  high: number;
-  band: number;
+  baseline: number | null;
+  low: number | null;
+  high: number | null;
+  band: number | null;
   rises: number;
   falls: number;
-  mhr: number;
-  toco: number;
+  mhr: number | null;
+  toco: number | null;
 };
 
-function median(xs: number[]): number {
-  if (!xs.length) return 0;
+export function isSample(v: CtgSample | undefined): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+export function formatSample(v: CtgSample | undefined, digits = 0): string {
+  if (!isSample(v)) return "–";
+  if (digits <= 0) return String(Math.round(v));
+  return v.toFixed(digits);
+}
+
+/** kPa derived from the 0–100 scale. Null when the factor or the sample is missing. */
+export function tocoKpa(pct: CtgSample | undefined, factor: number | undefined): number | null {
+  if (!isSample(pct) || factor == null || !Number.isFinite(factor)) return null;
+  return Math.round(pct * factor * 10) / 10;
+}
+
+function finite(xs: CtgSample[]): number[] {
+  const out: number[] = [];
+  for (const v of xs) {
+    if (isSample(v)) out.push(v);
+  }
+  return out;
+}
+
+function median(xs: number[]): number | null {
+  if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-function percentile(xs: number[], p: number): number {
-  if (!xs.length) return 0;
+function percentile(xs: number[], p: number): number | null {
+  if (!xs.length) return null;
   const s = [...xs].sort((a, b) => a - b);
   const i = Math.min(s.length - 1, Math.max(0, Math.round((p / 100) * (s.length - 1))));
   return s[i];
 }
 
-function episodes(values: number[], dt: number, pred: (v: number) => boolean, minSec: number): number {
+function roundOrNull(v: number | null, digits = 0): number | null {
+  if (v == null || !Number.isFinite(v)) return null;
+  const p = 10 ** digits;
+  return Math.round(v * p) / p;
+}
+
+function episodes(values: CtgSample[], dt: number, pred: (v: number) => boolean, minSec: number): number {
   let run = 0;
   let n = 0;
   for (const v of values) {
-    if (pred(v)) run += dt;
+    if (isSample(v) && pred(v)) run += dt;
     else {
       if (run >= minSec) n += 1;
       run = 0;
@@ -43,28 +73,29 @@ function episodes(values: number[], dt: number, pred: (v: number) => boolean, mi
 
 export function windowStats(session: CtgSession, winSec = 600): WindowStats[] {
   const out: WindowStats[] = [];
-  const { dt, fhr, mhr, toco, durationSec } = session;
+  const { dt, fhr, mhr, tocoPct, durationSec } = session;
   for (let t0 = 0; t0 < durationSec; t0 += winSec) {
     const t1 = Math.min(durationSec, t0 + winSec);
     const i0 = Math.floor(t0 / dt);
     const i1 = Math.min(fhr.length, Math.ceil(t1 / dt));
-    const f = fhr.slice(i0, i1);
-    const m = mhr.slice(i0, i1);
-    const c = toco.slice(i0, i1);
+    const fSlice = fhr.slice(i0, i1);
+    const f = finite(fSlice);
+    const m = finite(mhr.slice(i0, i1));
+    const c = finite(tocoPct.slice(i0, i1));
     const baseline = median(f);
     const low = percentile(f, 10);
     const high = percentile(f, 90);
     out.push({
       t0,
       t1,
-      baseline: Math.round(baseline),
-      low: Math.round(low),
-      high: Math.round(high),
-      band: Math.round(high - low),
-      rises: episodes(f, dt, (v) => v >= baseline + 15, 15),
-      falls: episodes(f, dt, (v) => v <= baseline - 15, 15),
-      mhr: Math.round(median(m)),
-      toco: Math.round(median(c) * 10) / 10,
+      baseline: roundOrNull(baseline, 0),
+      low: roundOrNull(low, 0),
+      high: roundOrNull(high, 0),
+      band: roundOrNull(low == null || high == null ? null : high - low, 0),
+      rises: baseline == null ? 0 : episodes(fSlice, dt, (v) => v >= baseline + 15, 15),
+      falls: baseline == null ? 0 : episodes(fSlice, dt, (v) => v <= baseline - 15, 15),
+      mhr: roundOrNull(median(m), 0),
+      toco: roundOrNull(median(c), 1),
     });
   }
   return out;
@@ -80,13 +111,28 @@ export function clockOf(startedAt: string, tSec: number): string {
   return `${p(hh)}:${p(mm)}:${p(ss)}`;
 }
 
+function csvCell(v: CtgSample | undefined): string {
+  return isSample(v) ? String(v) : "";
+}
+
 export function toCsv(session: CtgSession): string {
-  const lines = ["t_sec,clock,fhr_bpm,mhr_bpm,toco_kpa"];
+  const factor = session.tocoKpaPerPct;
+  const withKpa = factor != null && Number.isFinite(factor);
+  const lines = [withKpa ? "t_sec,clock,fhr_bpm,mhr_bpm,toco_pct,toco_kpa" : "t_sec,clock,fhr_bpm,mhr_bpm,toco_pct"];
   for (let i = 0; i < session.fhr.length; i++) {
     const t = i * session.dt;
-    lines.push(
-      [t, clockOf(session.startedAt, t), session.fhr[i], session.mhr[i], session.toco[i]].join(","),
-    );
+    const cells = [
+      String(t),
+      clockOf(session.startedAt, t),
+      csvCell(session.fhr[i]),
+      csvCell(session.mhr[i]),
+      csvCell(session.tocoPct[i]),
+    ];
+    if (withKpa) {
+      const kpa = tocoKpa(session.tocoPct[i], factor);
+      cells.push(kpa == null ? "" : String(kpa));
+    }
+    lines.push(cells.join(","));
   }
   return lines.join("\n");
 }

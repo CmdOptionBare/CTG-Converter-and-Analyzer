@@ -258,8 +258,8 @@ def _fit_projective_comb_1d(
         reg_pen = 4.0 * (rel_sc_dev ** 2)
         return (
             12.0 * mean_line * coverage
-            - 3.5 * sep_env_pen
-            - 1.8 * sep_line_pen
+            - 11.0 * sep_env_pen
+            - 3.0 * sep_line_pen
             + border_bonus
             - reg_pen
         )
@@ -294,7 +294,7 @@ def _fit_projective_comb_1d(
 
             sep_offs = (sc * ds_sep / (1.0 + kc * ds_sep)).reshape(1, -1)
             is0 = np.clip(np.floor(yc_col + sep_offs).astype(np.int32), 2, h - 3)
-            sep_pen_vec = 3.5 * rel_env[is0].mean(axis=1) + 1.8 * np.maximum(
+            sep_pen_vec = 11.0 * rel_env[is0].mean(axis=1) + 3.0 * np.maximum(
                 0.0, line_resp[is0]
             ).mean(axis=1)
 
@@ -328,6 +328,7 @@ def _rectify_x_coordinate_field(
     y_rect_grid: np.ndarray,
     y_rect_mask: np.ndarray,
     px_per_cm: int,
+    expected_src_px_per_cm: float | None = None,
 ) -> tuple[np.ndarray, int]:
     """Given a Y-rectified green grid (where every row s_y is already at exact canonical metric height),
     compute the horizontal inverse map x_src(X_out, Y_out) so that:
@@ -391,14 +392,23 @@ def _rectify_x_coordinate_field(
 
     ref_n = norm_prof(ref_p, ref_v)
 
-    # Estimate horizontal grid period at y_ref (physical 0.25 cm -> expected ~50..80 px in raw width)
+    # Estimate horizontal grid period at y_ref (physical 0.25 cm).
+    # Lock search band around vertical scale at y_ref so 2x major-line (0.50 cm) or 1/2x harmonic
+    # or 3/4x aliases are mathematically impossible!
+    if expected_src_px_per_cm is not None and expected_src_px_per_cm > 80.0:
+        exp_p = 0.25 * expected_src_px_per_cm
+        min_px_p = max(22.0, exp_p * 0.82)
+        max_px_p = min(130.0, exp_p * 1.20)
+    else:
+        min_px_p, max_px_p = 30.0, 110.0
+
     vx = np.where(ref_v)[0]
     if len(vx) > 300:
         p_x_ref = _estimate_local_period_px(
-            ref_p[int(vx[0]) + 30 : int(vx[-1]) - 30], min_p=30.0, max_p=110.0
+            ref_p[int(vx[0]) + 30 : int(vx[-1]) - 30], min_p=min_px_p, max_p=max_px_p
         )
     else:
-        p_x_ref = 65.0
+        p_x_ref = 0.25 * (expected_src_px_per_cm or 260.0)
 
     # Measure local x-shifts across X-windows between each band b and ref band 1
     win_half = max(180, rw // 8)
@@ -526,8 +536,10 @@ def _rectify_x_coordinate_field(
         w0 = max(x_left, int(round(wc)) - 320)
         w1 = min(x_right, int(round(wc)) + 320)
         if w1 - w0 >= 320:
-            p_loc = _estimate_local_period_px(stacked_vert[w0:w1], min_p=30.0, max_p=110.0)
-            if 0.75 * p_x_ref <= p_loc <= 1.33 * p_x_ref:
+            p_loc = _estimate_local_period_px(
+                stacked_vert[w0:w1], min_p=p_x_ref * 0.84, max_p=p_x_ref * 1.18
+            )
+            if 0.82 * p_x_ref <= p_loc <= 1.20 * p_x_ref:
                 meas_x.append(float(wc))
                 meas_px_per_cm.append(4.0 * p_loc)  # 4 vertical fine lines per 1.0 cm!
 
@@ -686,8 +698,17 @@ def rectify_ctg_frame(
     y_rect_grid = cv2.remap(deskew_grid, xr_grid_2d, y_of_s_and_xr, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     y_rect_mask = cv2.remap(deskew_mask, xr_grid_2d, y_of_s_and_xr, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-    # Step 3: Compute horizontal X-rectification field on the Y-rectified space
-    map_xr, out_w = _rectify_x_coordinate_field(y_rect_grid, y_rect_mask, px_per_cm=px_per_cm)
+    # Step 3: Compute horizontal X-rectification field on the Y-rectified space,
+    # anchored to the known vertical scale at lower-FHR (ds ~ -2.0 cm above separator)
+    med_sc = float(np.median(smooth_params[x_min_v:x_max_v, 1]))
+    med_k = float(np.median(smooth_params[x_min_v:x_max_v, 2]))
+    expected_x_scale = med_sc / ((1.0 + med_k * (-2.0)) ** 2)
+    map_xr, out_w = _rectify_x_coordinate_field(
+        y_rect_grid,
+        y_rect_mask,
+        px_per_cm=px_per_cm,
+        expected_src_px_per_cm=expected_x_scale,
+    )
 
     # Step 4: Compose Y-rectification + X-rectification + Initial Deskew into ONE direct map to original enhanced image!
     # At output pixel (Y_out, X_out), deskewed X is xr = map_xr[Y_out, X_out],

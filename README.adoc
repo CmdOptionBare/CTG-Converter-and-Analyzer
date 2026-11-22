@@ -1,0 +1,4 @@
+= CTG Converter and Analyzer
+:toc:
+
+Werkzeuge und Pipelines zur Bildverbesserung, 90-Grad-Gitterausrichtung und zum Panorama-Stitching abfotografierter CTG-Streifen.

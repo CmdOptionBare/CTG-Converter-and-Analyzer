@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Pipeline intermediate & generated outputs (keep repository clean; inputs in data/inputs/ are tracked via Git LFS)
+data/interim/
+data/outputs/
+!data/interim/.gitkeep
+!data/outputs/.gitkeep
+
+# Local cached ONNX weights
+models/*.onnx
+models/*.bin
+!models/.gitkeep
+
+# OS / IDE
+.DS_Store
+Thumbs.db

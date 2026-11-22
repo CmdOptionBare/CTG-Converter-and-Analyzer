@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QGraphicsLineItem,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -124,9 +125,10 @@ class TiledImageCanvas(QGraphicsView):
             self._scene.removeItem(item)
         self._overlay_items.clear()
 
-    def draw_canonical_grid_overlay(self, px_per_cm: int) -> None:
+    def draw_canonical_grid_overlay(self, px_per_cm: int, clear_first: bool = True) -> None:
         """Overlay exact 90-degree metric reference lines (1 cm major + FHR/Toco borders)."""
-        self.clear_overlays()
+        if clear_first:
+            self.clear_overlays()
         if self._img_w <= 0 or self._img_h <= 0:
             return
 
@@ -164,9 +166,12 @@ class TiledImageCanvas(QGraphicsView):
             self._overlay_items.append(vline)
             x += step_x
 
-    def draw_seam_overlays(self, seam_xs: list[int | None], placements: list[dict]) -> None:
+    def draw_seam_overlays(
+        self, seam_xs: list[int | None], placements: list[dict], clear_first: bool = True
+    ) -> None:
         """Draw vertical seam lines and frame index badges over the stitched panorama."""
-        self.clear_overlays()
+        if clear_first:
+            self.clear_overlays()
         if self._img_w <= 0 or self._img_h <= 0:
             return
 
@@ -197,6 +202,37 @@ class TiledImageCanvas(QGraphicsView):
             tag.setZValue(13.0)
             self._scene.addItem(tag)
             self._overlay_items.append(tag)
+
+    def draw_extracted_curves_overlay(self, curves_px: dict, clear_first: bool = False) -> None:
+        """Overlay Viterbi-extracted FHR (red), MHR (copper/orange), and Toco (cyan-blue) vector paths."""
+        if clear_first:
+            self.clear_overlays()
+        if self._img_w <= 0 or self._img_h <= 0:
+            return
+
+        xs = curves_px.get("x_px", [])
+        if len(xs) < 2:
+            return
+
+        def add_poly(ys: list[float], color: QColor, width: float) -> None:
+            if len(ys) != len(xs):
+                return
+            path = QPainterPath()
+            path.moveTo(float(xs[0]), float(ys[0]))
+            for x, y in zip(xs[1:], ys[1:]):
+                path.lineTo(float(x), float(y))
+            item = QGraphicsPathItem(path)
+            pen = QPen(color, width, Qt.PenStyle.SolidLine)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setZValue(15.0)
+            self._scene.addItem(item)
+            self._overlay_items.append(item)
+
+        add_poly(curves_px.get("fhr_y_px", []), QColor(245, 50, 50, 230), 2.2)
+        if curves_px.get("has_mhr_trace") and curves_px.get("mhr_y_px"):
+            add_poly(curves_px["mhr_y_px"], QColor(255, 145, 20, 225), 2.0)
+        add_poly(curves_px.get("toco_y_px", []), QColor(30, 155, 255, 230), 2.2)
 
     def fit_all(self) -> None:
         if self._img_w > 0 and self._img_h > 0:

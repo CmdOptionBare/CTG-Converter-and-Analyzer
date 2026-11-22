@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 
 from ctg_converter.dataset import DatasetManifest, DatasetPaths
+from ctg_converter.pipelines.extract import export_to_ctg_project1
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,3 +58,33 @@ def test_real_dataset_rectification_and_panorama_outputs() -> None:
         assert im_png.size == (stitch_meta["panorama_width_px"], 1420)
     with Image.open(webp_path) as im_webp:
         assert im_webp.size == (stitch_meta["panorama_width_px"], 1420)
+
+
+def test_real_dataset_extraction_and_ctg_project1_bridge(tmp_path: Path) -> None:
+    session_path = REAL_PATHS.output_dir / "ctg_session.json"
+    csv_path = REAL_PATHS.output_dir / "trace.csv"
+    assert session_path.exists()
+    assert csv_path.exists()
+
+    sess = json.loads(session_path.read_text(encoding="utf-8"))
+    assert sess["id"] == "2026-11-22"
+    assert sess["dt"] == 1
+    assert 4300 <= sess["durationSec"] <= 5100
+    assert len(sess["fhr"]) == sess["durationSec"] + 1
+    assert len(sess["mhr"]) == sess["durationSec"] + 1
+    assert len(sess["toco"]) == sess["durationSec"] + 1
+    assert len(sess["scans"]) == 21
+
+    # Clinical physiological sanity on the real Philips M2702A strip
+    fhr_med = sorted(sess["fhr"])[len(sess["fhr"]) // 2]
+    mhr_med = sorted(sess["mhr"])[len(sess["mhr"]) // 2]
+    assert 135.0 <= fhr_med <= 172.0
+    assert 72.0 <= mhr_med <= 90.0
+
+    # Verify drop-in export into a CTG-Project1 repository structure
+    mock_web_repo = tmp_path / "CTG-Project1"
+    out = export_to_ctg_project1(REAL_PATHS, mock_web_repo)
+    assert out["scans_exported"] == 21
+    assert (mock_web_repo / "src" / "data" / "ctg" / "2026-11-22.json").exists()
+    assert (mock_web_repo / "public" / "ctg" / "2026-11-22" / "trace.csv").exists()
+    assert (mock_web_repo / "public" / "ctg" / "2026-11-22" / "scans" / "frame_0001.jpg").exists()

@@ -30,6 +30,11 @@ from PySide6.QtWidgets import (
 )
 
 from ctg_converter.dataset.manifest import DatasetManifest, DatasetPaths
+from ctg_converter.pipelines.extract import (
+    ExtractConfig,
+    export_to_ctg_project1,
+    run_extract_pipeline,
+)
 from ctg_converter.pipelines.stitch import (
     WEBP_MAX_DIMENSION_PX,
     StitchConfig,
@@ -120,13 +125,22 @@ class StitchPanoramaTab(QWidget):
         left_layout.addWidget(self.btn_stitch)
 
         export_row = QHBoxLayout()
-        self.btn_exp_png = QPushButton("Als PNG speichern unter...")
+        self.btn_exp_png = QPushButton("Als PNG speichern...")
         self.btn_exp_png.clicked.connect(lambda: self._export_custom("png"))
-        self.btn_exp_webp = QPushButton("Als WebP speichern unter...")
+        self.btn_exp_webp = QPushButton("Als WebP speichern...")
         self.btn_exp_webp.clicked.connect(lambda: self._export_custom("webp"))
         export_row.addWidget(self.btn_exp_png)
         export_row.addWidget(self.btn_exp_webp)
         left_layout.addLayout(export_row)
+
+        bridge_row = QHBoxLayout()
+        self.btn_extract = QPushButton("Werte extrahieren (CSV + JSON)")
+        self.btn_extract.clicked.connect(self.run_extract)
+        self.btn_export_web = QPushButton("An CTG-Blatt Web-App senden...")
+        self.btn_export_web.clicked.connect(self._export_web_repo)
+        bridge_row.addWidget(self.btn_extract)
+        bridge_row.addWidget(self.btn_export_web)
+        left_layout.addLayout(bridge_row)
 
         splitter.addWidget(left_panel)
 
@@ -157,6 +171,11 @@ class StitchPanoramaTab(QWidget):
         self.chk_grid.setChecked(False)
         self.chk_grid.toggled.connect(lambda _: self._update_pano_overlays())
         bar.addWidget(self.chk_grid)
+
+        self.chk_curves = QCheckBox("Extrahierte Kurven (FHF/Puls/Toco)")
+        self.chk_curves.setChecked(True)
+        self.chk_curves.toggled.connect(lambda _: self._update_pano_overlays())
+        bar.addWidget(self.chk_curves)
 
         self.canvas = TiledImageCanvas()
         self.canvas.cursor_metric_changed.connect(self.status_message.emit)
@@ -238,11 +257,18 @@ class StitchPanoramaTab(QWidget):
         webp_p = self._paths.output_dir / "panorama.webp"
         png_mb = png_p.stat().st_size / (1024 * 1024) if png_p.exists() else 0.0
         webp_mb = webp_p.stat().st_size / (1024 * 1024) if webp_p.exists() else 0.0
+        extra_line = ""
+        sess_p = self._paths.output_dir / "ctg_session.json"
+        if sess_p.exists():
+            sess = json.loads(sess_p.read_text(encoding="utf-8"))
+            f_med = float(np.median(sess["fhr"])) if sess.get("fhr") else 0.0
+            m_med = float(np.median(sess["mhr"])) if sess.get("mhr") else 0.0
+            extra_line = f"\nWerte (1 Hz): {len(sess.get('fhr', []))}s | FHF ~{f_med:.0f} bpm | Puls ~{m_med:.0f} bpm"
         self.lbl_summary.setText(
             f"Panorama:    {m['panorama_width_px']} x {m['panorama_height_px']} px\n"
             f"CTG-Länge:   {m['estimated_strip_length_cm']:.1f} cm ({m['estimated_duration_minutes']:.1f} Min @ 1 cm/min)\n"
             f"Auflösung:   {m['target_px_per_cm']} px/cm (1 Kästchen = {m['target_px_per_cm']*0.25:.0f} px)\n"
-            f"Dateigrößen: PNG = {png_mb:.2f} MB  |  WebP = {webp_mb:.2f} MB"
+            f"Dateigrößen: PNG = {png_mb:.2f} MB  |  WebP = {webp_mb:.2f} MB{extra_line}"
         )
 
     def _sync_spinboxes_from_pair(self, row: int) -> None:
@@ -383,12 +409,45 @@ class StitchPanoramaTab(QWidget):
             return
         self.canvas.clear_overlays()
         if self.chk_grid.isChecked():
-            self.canvas.draw_canonical_grid_overlay(self._manifest.target_px_per_cm)
+            self.canvas.draw_canonical_grid_overlay(self._manifest.target_px_per_cm, clear_first=False)
         if self.chk_seams.isChecked():
             self.canvas.draw_seam_overlays(
                 self._stitch_meta.get("seam_x_positions_px", []),
                 self._stitch_meta.get("frame_placements", []),
+                clear_first=False,
             )
+        if self.chk_curves.isChecked() and self._paths is not None:
+            cp = self._paths.output_dir / "extracted_curves_px.json"
+            if cp.exists():
+                curves_px = json.loads(cp.read_text(encoding="utf-8"))
+                self.canvas.draw_extracted_curves_overlay(curves_px, clear_first=False)
+
+    def run_extract(self) -> None:
+        if self._paths is None:
+            return
+        self.status_message.emit("Extrahiere kalibrierte 1-Hz FHF-, Puls- und Toco-Zeitreihen via Viterbi-Tracking ...")
+        QApplication.processEvents()
+        res = run_extract_pipeline(self._paths, ext_cfg=ExtractConfig())
+        self.chk_curves.setChecked(True)
+        self._update_pano_overlays()
+        self._refresh_summary()
+        self.status_message.emit(
+            f"Werte extrahiert ({res['samples_1hz']} Sek): FHF Median {res['fhr_median_bpm']} bpm | "
+            f"Puls {res['mhr_median_bpm']} bpm | Toco {res['toco_median_pct']}% -> trace.csv & ctg_session.json"
+        )
+
+    def _export_web_repo(self) -> None:
+        if self._paths is None:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "Ziel-Repository von CTG-Project1 (CTG BLATT) auswählen", str(Path.home())
+        )
+        if not folder:
+            return
+        out = export_to_ctg_project1(self._paths, Path(folder))
+        self.status_message.emit(
+            f"CTG-Blatt Web-Export abgeschlossen: {out['session_json']} ({out['scans_exported']} Scans)"
+        )
 
     def run_stitch(self) -> None:
         if self._paths is None:

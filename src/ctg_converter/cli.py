@@ -15,6 +15,11 @@ from ctg_converter.dataset import (
     list_datasets,
 )
 from ctg_converter.pipelines.enhance import EnhanceConfig, run_enhance_pipeline
+from ctg_converter.pipelines.extract import (
+    ExtractConfig,
+    export_to_ctg_project1,
+    run_extract_pipeline,
+)
 from ctg_converter.pipelines.rectify import RectifyConfig, run_rectify_pipeline
 from ctg_converter.pipelines.stitch import StitchConfig, run_stitch_pipeline
 
@@ -83,10 +88,28 @@ def main(argv: list[str] | None = None) -> int:
     p_st.add_argument("--px-per-cm", type=int, default=None, help="Override target px/cm")
     p_st.add_argument("--no-onnx", action="store_true", help="Disable ONNX patch matcher")
 
-    p_all = sub.add_parser("run-all", help="Execute Enhance -> Rectify -> Stitch end-to-end")
+    p_all = sub.add_parser("run-all", help="Execute Enhance -> Rectify -> Stitch -> Extract end-to-end")
     add_ds_args(p_all)
     p_all.add_argument("--px-per-cm", type=int, default=None, help="Override target px/cm")
     p_all.add_argument("--no-onnx", action="store_true", help="Disable ONNX patch matcher")
+
+    # extract (Pipeline 4: Image-to-Value)
+    p_ext = sub.add_parser(
+        "extract",
+        help="Run Pipeline 4 (Viterbi FHR/MHR/Toco curve extraction -> trace.csv & ctg_session.json)",
+    )
+    add_ds_args(p_ext)
+    p_ext.add_argument("--started-at", default="2026-11-22T11:10:12", help="ISO start timestamp on paper")
+    p_ext.add_argument("--session-id", default=None, help="Session ID for CTG-Project1 JSON")
+
+    # export-web (Bridge to CmdOptionBare/CTG-Project1)
+    p_web = sub.add_parser(
+        "export-web",
+        help="Export calibrated CtgSession JSON, trace.csv, and scans into CmdOptionBare/CTG-Project1",
+    )
+    add_ds_args(p_web)
+    p_web.add_argument("--target-repo", required=True, help="Path to local CTG-Project1 repository")
+    p_web.add_argument("--session-id", default=None, help="Override session ID (e.g. 2026-11-22)")
 
     # gui
     p_gui = sub.add_parser("gui", help="Launch visual PySide6 Alignment & Stitching Studio")
@@ -148,6 +171,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "extract":
+        ecfg = ExtractConfig(started_at_iso=args.started_at, session_id=args.session_id)
+        res = run_extract_pipeline(paths, ext_cfg=ecfg)
+        res["elapsed_sec"] = round(time.perf_counter() - t0, 2)
+        res["peak_rss_mb"] = _peak_rss_mb()
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.command == "export-web":
+        out = export_to_ctg_project1(
+            paths,
+            target_repo_dir=Path(args.target_repo),
+            session_id=args.session_id,
+        )
+        out["elapsed_sec"] = round(time.perf_counter() - t0, 2)
+        print(json.dumps(out, indent=2))
+        return 0
+
     if args.command in ("stitch", "run-all"):
         if args.command == "run-all":
             run_enhance_pipeline(paths, cfg=EnhanceConfig())
@@ -157,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         rcfg = RectifyConfig(target_px_per_cm=args.px_per_cm) if args.px_per_cm else None
         scfg = StitchConfig(use_onnx_matcher=not args.no_onnx)
         report = run_stitch_pipeline(paths, stitch_cfg=scfg, rect_cfg=rcfg)
+        ext_summary = run_extract_pipeline(paths, ext_cfg=ExtractConfig())
         summary = {
             "dataset_id": report["dataset_id"],
             "panorama_size": f"{report['panorama_width_px']}x{report['panorama_height_px']}",
@@ -164,6 +206,10 @@ def main(argv: list[str] | None = None) -> int:
             "duration_minutes": report["estimated_duration_minutes"],
             "png": report["exports"]["png"],
             "webp": report["exports"]["webp"],
+            "ctg_session_json": ext_summary["outputs"]["ctg_session_json"],
+            "trace_csv": ext_summary["outputs"]["trace_csv"],
+            "fhr_median_bpm": ext_summary["fhr_median_bpm"],
+            "mhr_median_bpm": ext_summary["mhr_median_bpm"],
             "elapsed_sec": round(time.perf_counter() - t0, 2),
             "peak_rss_mb": _peak_rss_mb(),
         }

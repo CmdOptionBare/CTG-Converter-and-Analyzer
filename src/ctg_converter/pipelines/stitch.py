@@ -36,7 +36,7 @@ class StitchConfig:
     use_onnx_matcher: bool = True
     min_overlap_px: int = 120
     max_abs_dy_px: int = 10
-    feather_width_px: int = 25
+    feather_width_px: int = 7
     export_png: bool = True
     export_webp: bool = True
     webp_quality: int = 92
@@ -359,6 +359,7 @@ def _find_minimum_error_vertical_seam(cost: np.ndarray) -> np.ndarray:
 
 def _blend_frame_onto_canvas(
     canvas_bgr: np.ndarray,
+    canvas_trace: np.ndarray,
     canvas_mask: np.ndarray,
     frame_bgr: np.ndarray,
     frame_trace: np.ndarray,
@@ -367,7 +368,7 @@ def _blend_frame_onto_canvas(
     y_off: int,
     feather_px: int = 9,
 ) -> int | None:
-    """Composite ``frame_bgr`` onto ``canvas_bgr`` at ``(x_off, y_off)`` using DP minimum-error seam."""
+    """Composite ``frame_bgr`` and ``frame_trace`` onto panorama canvases using DP minimum-error seam."""
     ch, cw = canvas_bgr.shape[:2]
     fh, fw = frame_bgr.shape[:2]
 
@@ -382,6 +383,7 @@ def _blend_frame_onto_canvas(
     fy0, fy1 = cy0 - y_off, cy1 - y_off
 
     c_roi = canvas_bgr[cy0:cy1, cx0:cx1]
+    ct_roi = canvas_trace[cy0:cy1, cx0:cx1]
     cm_roi = canvas_mask[cy0:cy1, cx0:cx1] > 0
     f_roi = frame_bgr[fy0:fy1, fx0:fx1]
     ft_roi = frame_trace[fy0:fy1, fx0:fx1]
@@ -392,6 +394,7 @@ def _blend_frame_onto_canvas(
 
     if not np.any(both):
         c_roi[only_f] = f_roi[only_f]
+        ct_roi[only_f] = ft_roi[only_f]
         canvas_mask[cy0:cy1, cx0:cx1][only_f] = 255
         return None
 
@@ -401,23 +404,27 @@ def _blend_frame_onto_canvas(
 
     if bx1 - bx0 < 8:
         c_roi[only_f] = f_roi[only_f]
+        ct_roi[only_f] = ft_roi[only_f]
         canvas_mask[cy0:cy1, cx0:cx1][only_f] = 255
         return cx0 + bx0
 
     c_ov = c_roi[:, bx0:bx1].astype(np.float32)
     f_ov = f_roi[:, bx0:bx1].astype(np.float32)
+    ct_ov = ct_roi[:, bx0:bx1].astype(np.float32)
+    ft_ov = ft_roi[:, bx0:bx1].astype(np.float32)
     both_ov = both[:, bx0:bx1]
     cm_ov = cm_roi[:, bx0:bx1]
     fm_ov = fm_roi[:, bx0:bx1]
 
-    # Color + trace difference cost; strongly penalize cutting outside `both_ov` or right on edge
+    # Color + trace difference cost; route seam through blank white paper away from ink/text!
     rgb_diff = np.mean(np.abs(c_ov - f_ov), axis=2)
-    trace_pen = 1.5 * ft_roi[:, bx0:bx1].astype(np.float32)
+    ink_diff = np.abs(ct_ov - ft_ov)
+    ink_presence = np.maximum(ct_ov, ft_ov)
     ov_w = bx1 - bx0
     x_norm = np.linspace(-1.0, 1.0, ov_w, dtype=np.float32).reshape(1, -1)
-    edge_bias = 18.0 * (x_norm ** 4)  # Prefer seam near interior of overlap away from cut boundaries
+    edge_bias = 14.0 * (x_norm ** 4)  # Prefer seam near interior of overlap away from cut boundaries
 
-    cost = rgb_diff + 0.35 * trace_pen + edge_bias
+    cost = rgb_diff + 1.8 * ink_diff + 0.85 * ink_presence + edge_bias
     cost = np.where(both_ov, cost, 5000.0)
     seam_rel = _find_minimum_error_vertical_seam(cost)
 
@@ -435,11 +442,18 @@ def _blend_frame_onto_canvas(
     blended_ov = np.clip(
         c_ov * (1.0 - alpha_f[:, :, None]) + f_ov * alpha_f[:, :, None], 0.0, 255.0
     ).astype(np.uint8)
+    blended_trace_ov = np.clip(
+        ct_ov * (1.0 - alpha_f) + ft_ov * alpha_f, 0.0, 255.0
+    ).astype(np.uint8)
 
     # First copy pure frame-only columns outside [bx0:bx1], then write blended overlap
     c_roi[only_f] = f_roi[only_f]
+    ct_roi[only_f] = ft_roi[only_f]
     c_roi[:, bx0:bx1] = np.where(
         (cm_ov | fm_ov)[:, :, None], blended_ov, c_roi[:, bx0:bx1]
+    )
+    ct_roi[:, bx0:bx1] = np.where(
+        cm_ov | fm_ov, blended_trace_ov, ct_roi[:, bx0:bx1]
     )
     canvas_mask[cy0:cy1, cx0:cx1] = np.where(
         cm_roi | fm_roi, 255, canvas_mask[cy0:cy1, cx0:cx1]
@@ -593,8 +607,9 @@ def run_stitch_pipeline(
     canon_h = int(round(CANONICAL_TOTAL_HEIGHT_CM * px_per_cm))
     pano_w = int(np.max(gx_int + np.array(frame_widths, dtype=np.int32)))
 
-    # Allocate single panorama canvas (e.g. ~8500 x 1420 x 3 = ~36 MB RAM!)
+    # Allocate single panorama canvas (e.g. ~8500 x 1420 x 3 = ~36 MB RAM + 11 MB trace!)
     canvas_bgr = np.full((canon_h, pano_w, 3), 252, dtype=np.uint8)
+    canvas_trace = np.zeros((canon_h, pano_w), dtype=np.uint8)
     canvas_mask = np.zeros((canon_h, pano_w), dtype=np.uint8)
     seam_x_positions: list[int | None] = []
 
@@ -616,11 +631,20 @@ def run_stitch_pipeline(
             x0 = int(gx_int[0])
             y0 = int(gy_int[0])
             _blend_frame_onto_canvas(
-                canvas_bgr, canvas_mask, f_bgr, f_trace, f_mask, x0, y0, feather_px=stitch_cfg.feather_width_px
+                canvas_bgr,
+                canvas_trace,
+                canvas_mask,
+                f_bgr,
+                f_trace,
+                f_mask,
+                x0,
+                y0,
+                feather_px=stitch_cfg.feather_width_px,
             )
         else:
             seam_x = _blend_frame_onto_canvas(
                 canvas_bgr,
+                canvas_trace,
                 canvas_mask,
                 f_bgr,
                 f_trace,
@@ -638,8 +662,13 @@ def run_stitch_pipeline(
     trim_x0 = int(valid_pano_cols[0]) if len(valid_pano_cols) else 0
     trim_x1 = int(valid_pano_cols[-1]) + 1 if len(valid_pano_cols) else pano_w
     canvas_bgr = canvas_bgr[:, trim_x0:trim_x1]
+    canvas_trace = canvas_trace[:, trim_x0:trim_x1]
     canvas_mask = canvas_mask[:, trim_x0:trim_x1]
     final_h, final_w = canvas_bgr.shape[:2]
+
+    trace_png_path = paths.output_dir / "panorama_trace.png"
+    cv2.imwrite(str(trace_png_path), canvas_trace, [cv2.IMWRITE_PNG_COMPRESSION, 6])
+    del canvas_trace
 
     png_path: Path | None = None
     webp_path: Path | None = None
@@ -696,6 +725,7 @@ def run_stitch_pipeline(
         "exports": {
             "png": str(png_path) if png_path else None,
             "webp": str(webp_path) if webp_path else None,
+            "trace_png": str(trace_png_path),
             "webp_scale_factor": round(webp_scale, 5),
         },
         "frame_placements": [

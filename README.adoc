@@ -128,7 +128,7 @@ Mit einem einzigen Befehl werden `src/data/ctg/<id>.json` (`CtgSession`-Schema),
 ----
 
 [%collapsible]
-.Gemessene Benchmark-Werte auf dem 21-Bilder-Realtst (`2026-11-22_philips_ctg_001`)
+.Gemessene Benchmark-Werte auf dem 21-Bilder-Realtest (`2026-11-22_philips_ctg_001`)
 ====
 [cols="2,2,2",options="header"]
 |===
@@ -139,12 +139,12 @@ Mit einem einzigen Befehl werden `src/data/ctg/<id>.json` (`CtgSession`-Schema),
 |`frame_0001..0012` Hochformat, `frame_0013..0021` `90° CCW` gedreht
 
 |Orthogonalität nach Pipeline 2
-|`89,45° – 90,15°` (Mittel `90,00°`)
+|`89,45° – 90,35°` (Mittel `90,01°`, Median `90,00°`)
 |Einzelner Remap-Durchlauf (`cv2.remap`) auf `1420 px` Zielhöhe
 
 |Hybrides Paar-Matching (`NCC + ONNX`)
 |`20 / 20` Paare (`10 – 89` ONNX-Inlier)
-|Maximale vertikale Abweichung `\|dy\| <= 1 px` (`0,1 mm`)
+|`\|dy\| <= 1 px`; 6 der 20 Nähte haben eine Konfidenz unter `0,42` (Kurven-NCC bis hinab zu `0,05`) und sind noch nicht unabhängig geprüft
 
 |Fertiges Gesamt-Panorama
 |`7835 × 1420 px` (`78,35 cm` = `78,35 Min`)
@@ -152,7 +152,7 @@ Mit einem einzigen Befehl werden `src/data/ctg/<id>.json` (`CtgSession`-Schema),
 
 |Extrahierte Vitalkurven (`1 Hz`, `4700 s`)
 |`FHF` Median `157,8 bpm`, `Puls` Median `80,1 bpm`
-|Deckungsgleich mit den gedruckten Monitorwerten (`Puls 74–84 /min`)
+|Puls-Median liegt im Bereich der gedruckten Werte (`74–84 /min`); punktweise Validierung steht noch aus
 
 |Speicherbedarf (4-Kern-CPU, ohne GPU)
 |`389,7 MB` Peak-RSS (CLI) / `291 MB` (GUI)

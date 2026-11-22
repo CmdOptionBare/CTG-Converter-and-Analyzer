@@ -1,14 +1,12 @@
-"""Pipeline 4: Calibrated Image-to-Value Curve Extraction (FHR, MHR, Toco, Kineto)
-and Direct Session Export Bridge for the ``CmdOptionBare/CTG-Project1`` Web Viewer.
-"""
+"""Pipeline 4: Calibrated Image-to-Value Curve Extraction (FHR, MHR, Toco, Kineto)."""
 
 from __future__ import annotations
 
 import csv
 import json
 import re
-import shutil
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +21,12 @@ from ctg_converter.pipelines.rectify import (
     TOCO_S_TOP_CM,
 )
 from ctg_converter.pipelines.stitch import StitchConfig, run_stitch_pipeline
+from ctg_converter.pipelines.validate import find_time_stamps
 
 
 @dataclass
 class ExtractConfig:
-    """Configuration for calibrated curve extraction and CTG-Project1 export."""
+    """Configuration for calibrated curve extraction."""
 
     dt_sec: float = 1.0
     started_at_iso: str = "2026-11-22T11:10:12"
@@ -48,13 +47,31 @@ def _extract_black_ink_from_bgr(pano_bgr: np.ndarray) -> np.ndarray:
     return np.clip(244.0 - neutral_lum, 0.0, 255.0).astype(np.uint8)
 
 
+# 100 mmHg = 13.33 kPa. On this strip the green "12" kPa label sits on the
+# 90 line of the 0-100 grid and "0" sits on the 0 line, so 100 units = 13.33 kPa.
+TOCO_KPA_PER_PCT = 0.1333
+
+# A column whose tracked y has no ink this dark, for longer than _INK_BRIDGE_PX,
+# is a real gap (paper edge, pen up, blank leader) and is exported as null.
+_INK_MIN = 35
+_INK_TOL_PX = 3
+_INK_BRIDGE_PX = 8
+
+
 def _prepare_curve_reward(band_u8: np.ndarray, px_per_cm: int) -> tuple[np.ndarray, np.ndarray]:
-    """Suppress isolated printed digits/text while preserving continuous curve strokes.
+    """Suppress printed text while preserving continuous pen strokes.
+
+    A plain connected-component test on the whole band fails: the grid joins the
+    pen, the stamps and the scale digits into one component. Word-shaped blocks
+    that are still separate (a label, a short stamp stroke) are down-weighted.
+    The repeated header line and the vertical time stamp are handled by
+    ``_downweight_header_text`` and ``_downweight_left_stamp``.
 
     Returns ``(reward_float32, long_ribbon_mask_bool)``.
     """
     bw = (band_u8 >= 26).astype(np.uint8)
-    # Bridge small 4-5 px horizontal gaps in dotted/fast pen strokes without merging adjacent text lines
+    # Bridge dotted pen gaps. Do not open horizontally: on the spiky parts of this
+    # strip a width-3 opening deletes the fetal stroke and leaves the grid line.
     bridge_w = max(3, int(round(0.05 * px_per_cm)))
     closed = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, np.ones((1, bridge_w), dtype=np.uint8))
 
@@ -68,19 +85,199 @@ def _prepare_curve_reward(band_u8: np.ndarray, px_per_cm: int) -> tuple[np.ndarr
     for cid in range(1, num_cc):
         w_cc = int(stats[cid, cv2.CC_STAT_WIDTH])
         h_cc = int(stats[cid, cv2.CC_STAT_HEIGHT])
-        if w_cc >= min_curve_w:
+        area = int(stats[cid, cv2.CC_STAT_AREA])
+        fill = area / max(1, w_cc * h_cc)
+        aspect = w_cc / max(1, h_cc)
+        # A printed word ("FHR1", "110-200", "Puls", "200") is a compact block:
+        # letter height, high fill, not a long ribbon. A pen stroke over the same
+        # width is either much flatter or a thin line through a tall box.
+        is_text_block = w_cc >= 18 and 12 <= h_cc <= 48 and fill >= 0.32 and aspect <= 6.0
+        if is_text_block:
+            cc_weights[cid] = 0.03
+        elif w_cc >= min_curve_w and h_cc > 2:
             cc_weights[cid] = 1.0
             is_long[cid] = True
-        elif w_cc < min_curve_w and h_cc <= max_char_h:
-            # Compact isolated character or speck (e.g. printed '200', '180', '80' scale labels)
-            cc_weights[cid] = 0.08
+        elif h_cc <= max_char_h:
+            cc_weights[cid] = 0.04
         else:
-            # Steep vertical spike segment
-            cc_weights[cid] = 0.65
+            cc_weights[cid] = 0.35
 
     weighted = band_u8.astype(np.float32) * cc_weights[labels]
     reward = cv2.GaussianBlur(weighted, (0, 0), sigmaX=1.3, sigmaY=1.6)
     return reward, is_long[labels]
+
+
+def _attenuate_grid_rows(reward: np.ndarray, period_px: float, phase_px: float, factor: float = 0.15) -> np.ndarray:
+    """Dim the pre-printed grid rows so a flat line cannot outscore the pen.
+
+    The black-ink layer still contains the green grid. A Viterbi path will ride
+    one of those rows when the pen reward next to it is patchy. The pen is
+    several pixels thick, so dimming the grid row itself leaves the stroke.
+    """
+    out = reward.copy()
+    h = out.shape[0]
+    y = float(phase_px)
+    # One row only. The pen is thicker than the grid line, and the maternal
+    # pulse often lies on the 80 bpm line, so a wider notch would erase it.
+    while y < h + period_px:
+        yi = int(round(y))
+        if 0 <= yi < h:
+            out[yi] *= factor
+        y += period_px
+    return out
+
+
+def _downweight_header_text(band_u8: np.ndarray, reward: np.ndarray, header_rows: int) -> np.ndarray:
+    """Down-weight printed header text in the top of the FHR band.
+
+    The repeated ``FHR1 110-200`` / ``Puls`` blocks sit above about 180 bpm and,
+    on the full band, a single pen spike joins them to the trace so they inherit
+    the trace's weight. Classifying that strip on its own keeps a real high
+    fetal rate (a long thin stroke) and drops the word-shaped blocks.
+    """
+    header_rows = int(max(0, min(header_rows, band_u8.shape[0] // 2)))
+    if header_rows < 20:
+        return reward
+    sub = band_u8[:header_rows]
+    bw = (sub >= 26).astype(np.uint8)
+    opened = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((1, 3), dtype=np.uint8))
+    closed = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, np.ones((1, 5), dtype=np.uint8))
+    num_cc, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    scale = np.ones(num_cc, dtype=np.float32)
+    for cid in range(1, num_cc):
+        w_cc = int(stats[cid, cv2.CC_STAT_WIDTH])
+        h_cc = int(stats[cid, cv2.CC_STAT_HEIGHT])
+        area = int(stats[cid, cv2.CC_STAT_AREA])
+        fill = area / max(1, w_cc * h_cc)
+        aspect = w_cc / max(1, h_cc)
+        is_text_block = w_cc >= 18 and 12 <= h_cc <= 48 and fill >= 0.32 and aspect <= 6.0
+        is_small = w_cc < 28 and h_cc <= 32
+        if is_text_block or is_small:
+            scale[cid] = 0.04
+    factor = scale[labels]
+    out = reward.copy()
+    out[:header_rows] *= factor
+    return out
+
+
+def _downweight_left_stamp(band_u8: np.ndarray, reward: np.ndarray, px_per_cm: int) -> np.ndarray:
+    """Drop the vertical time stamp printed at the left edge of the recording.
+
+    Segmented on its own, that stamp is a set of short strokes that never reach
+    the rest of the trace. A horizontal opening removes the 1 px grid lines that
+    would otherwise join those strokes to the page. The pen, later on, is not in
+    this crop.
+    """
+    crop = int(round(4.0 * px_per_cm))
+    crop = max(40, min(crop, band_u8.shape[1] // 3))
+    if band_u8.shape[1] < crop + 10:
+        return reward
+    bw = (band_u8[:, :crop] >= 26).astype(np.uint8)
+    opened = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((1, 3), dtype=np.uint8))
+    num_cc, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    kill = np.zeros(num_cc, dtype=bool)
+    for cid in range(1, num_cc):
+        right = int(stats[cid, cv2.CC_STAT_LEFT] + stats[cid, cv2.CC_STAT_WIDTH])
+        if right < crop - 12:
+            kill[cid] = True
+    if not kill.any():
+        return reward
+    mask = cv2.dilate(kill[labels].astype(np.uint8), np.ones((3, 3), dtype=np.uint8)).astype(bool)
+    out = reward.copy()
+    out[:, :crop] = np.where(mask, out[:, :crop] * 0.03, out[:, :crop])
+    return out
+
+
+def _leading_gridlock_end(
+    y_px: np.ndarray,
+    origin: float,
+    step: float,
+    tol: float = 4.0,
+    free_need: int = 150,
+    lock_need: int = 40,
+) -> int:
+    """Return the x where a leading grid-line ride gives way to the pen.
+
+    Before the pens are down the tracker sits on a grid line (here the 110 bpm
+    line). A scale digit can tug it off that line for a few dozen columns and
+    then it locks back on, so a long lock resets the count of off-line columns.
+    The walk stops once the path has stayed off the grid, which is the pen.
+    """
+    rel = np.mod(y_px.astype(np.float64) - origin, step)
+    dist = np.minimum(rel, step - rel)
+    locked = dist < tol
+    cut = 0
+    free = 0
+    x = 0
+    n = len(y_px)
+    while x < n and free < free_need:
+        if not locked[x]:
+            free += 1
+            x += 1
+            continue
+        x1 = x
+        while x1 < n and locked[x1]:
+            x1 += 1
+        if (x1 - x) >= lock_need and free < free_need:
+            cut = x1
+            free = 0
+        x = x1
+    # Include the short jump off the line that follows the lock.
+    # The path then steps off the line onto the pen in about 15 columns.
+    # Those columns are the jump, not a sample of the trace.
+    if cut > 0:
+        cut = min(n, cut + 18)
+    return int(cut)
+
+
+def _columns_on_ink(trace_u8: np.ndarray, y_px: np.ndarray, tol: int = _INK_TOL_PX, ink_min: int = _INK_MIN) -> np.ndarray:
+    """True where ``trace_u8`` has ink within ``tol`` px of the tracked row."""
+    h, w = trace_u8.shape
+    yi = np.clip(np.round(y_px).astype(np.int32), 0, h - 1)
+    acc = np.zeros(w, dtype=np.uint8)
+    cols = np.arange(w)
+    for delta in range(-tol, tol + 1):
+        yy = np.clip(yi + delta, 0, h - 1)
+        acc = np.maximum(acc, trace_u8[yy, cols])
+    return acc >= ink_min
+
+
+def _bridge_internal_gaps(valid: np.ndarray, max_gap: int) -> np.ndarray:
+    """Fill only short holes that have ink on both sides. Leading and trailing blanks stay blank."""
+    out = valid.astype(bool).copy()
+    n = len(out)
+    x = 0
+    while x < n:
+        if out[x]:
+            x += 1
+            continue
+        x1 = x
+        while x1 < n and not out[x1]:
+            x1 += 1
+        if x > 0 and x1 < n and (x1 - x) <= max_gap:
+            out[x:x1] = True
+        x = x1
+    return out
+
+
+def _resample_with_gaps(
+    values: np.ndarray,
+    valid: np.ndarray,
+    x_query: np.ndarray,
+    xs_full: np.ndarray,
+    ndigits: int,
+) -> list[float | None]:
+    """Sample ``values`` at ``x_query``. Columns that are not ``valid`` become ``None``."""
+    interp = np.interp(x_query, xs_full, values.astype(np.float64))
+    out: list[float | None] = []
+    last = len(valid) - 1
+    for i, xq in enumerate(x_query):
+        xi = int(np.clip(int(round(float(xq))), 0, last))
+        if not valid[xi]:
+            out.append(None)
+        else:
+            out.append(round(float(interp[i]), ndigits))
+    return out
 
 
 def _viterbi_ridge_1d(
@@ -195,7 +392,7 @@ def _detect_kineto_events(
                     {
                         "t": t_sec,
                         "kind": "kineto",
-                        "text": "Kindsbewegung (Kineto-Markierung)",
+                        "text": "Kineto",
                     }
                 )
                 last_t = t_sec
@@ -203,17 +400,26 @@ def _detect_kineto_events(
     return events
 
 
-def _clock_str(started_at_iso: str, t_sec: float) -> str:
-    m = re.search(r"(\d{2}):(\d{2}):(\d{2})", started_at_iso)
-    if m:
-        h0, m0, s0 = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    else:
-        h0, m0, s0 = 11, 10, 12
-    total = h0 * 3600 + m0 * 60 + s0 + max(0, int(round(t_sec)))
-    hh = (total // 3600) % 24
-    mm = (total // 60) % 60
-    ss = total % 60
-    return f"{hh:02d}:{mm:02d}:{ss:02d}"
+def _clock_at_left_edge(header_iso: str, first_stamp_x_px: float | None, px_per_sec: float) -> datetime:
+    """Clock time at panorama x = 0.
+
+    The recorder prints its start time to the second in the vertical header and
+    then stamps the separator strip at the next full minute (header 11:10:12,
+    first stamp 11:11 on the reference strip). The stamp is the better anchor:
+    the panorama starts with blank leader, so the header time is not at x = 0.
+    Without a stamp the header time is assumed to sit at the left edge.
+    """
+    header = datetime.fromisoformat(header_iso)
+    if first_stamp_x_px is None:
+        return header
+    stamp_clock = header.replace(second=0, microsecond=0)
+    if stamp_clock < header:
+        stamp_clock += timedelta(minutes=1)
+    return stamp_clock - timedelta(seconds=round(first_stamp_x_px / px_per_sec))
+
+
+def _clock_str(clock_at_zero: datetime, t_sec: float) -> str:
+    return (clock_at_zero + timedelta(seconds=max(0, int(round(t_sec))))).strftime("%H:%M:%S")
 
 
 def run_extract_pipeline(
@@ -257,6 +463,13 @@ def run_extract_pipeline(
     # --- 1. FHR + Maternal Pulse (MHR) dual-curve Viterbi tracking ---
     fhr_band = trace_u8[fhr_y0:fhr_y1, :]
     fhr_reward, fhr_long_mask = _prepare_curve_reward(fhr_band, px_per_cm)
+    # Printed "FHR1 110-200" / "Puls" headers live above ~178 bpm. Real baseline
+    # on this recording sits near 140-170, so this does not blank the trace.
+    header_rows = int(round((210.0 - 178.0) * fhr_px_per_bpm))
+    fhr_reward = _downweight_header_text(fhr_band, fhr_reward, header_rows)
+    fhr_reward = _downweight_left_stamp(fhr_band, fhr_reward, px_per_cm)
+    # FHR grid is every 0.25 cm. Band row 0 is the 210 bpm line.
+    fhr_reward = _attenuate_grid_rows(fhr_reward, period_px=0.25 * px_per_cm, phase_px=0.0)
     fh_h = fhr_band.shape[0]
     ys_rel = np.arange(fh_h, dtype=np.float32)
     bpm_grid = 210.0 - ys_rel / fhr_px_per_bpm
@@ -307,6 +520,10 @@ def run_extract_pipeline(
     kineto_h = min(toco_band.shape[0] // 3, int(round(0.36 * px_per_cm)))
     toco_band[:kineto_h, :] = (toco_band[:kineto_h, :].astype(np.float32) * 0.05).astype(np.uint8)
     toco_reward, _ = _prepare_curve_reward(toco_band, px_per_cm)
+    # Toco grid is every 0.40 cm. The 100-line is at the top edge of the band.
+    toco_phase = (TOCO_S_TOP_CM * px_per_cm) - toco_y0
+    toco_reward = _attenuate_grid_rows(toco_reward, period_px=0.40 * px_per_cm, phase_px=toco_phase)
+    toco_reward = _downweight_left_stamp(toco_band, toco_reward, px_per_cm)
 
     th_h = toco_band.shape[0]
     toco_pct_grid = 100.0 - np.arange(th_h, dtype=np.float32) / toco_px_per_pct
@@ -345,13 +562,57 @@ def run_extract_pipeline(
     x_query = np.clip(t_grid * px_per_sec, 0.0, float(w - 1))
     xs_full = np.arange(w, dtype=np.float64)
 
-    fhr_series = [round(float(v), 1) for v in np.interp(x_query, xs_full, fhr_bpm_px)]
-    mhr_series = [round(float(v), 1) for v in np.interp(x_query, xs_full, mhr_bpm_px)]
-    toco_pct_series = [round(float(v), 1) for v in np.interp(x_query, xs_full, toco_pct_px)]
-    # CTG-Project1's paper.tsx maps 0..12 kPa linearly across the full Toco panel height!
-    toco_kpa_series = [round(float(v) * 0.12, 2) for v in toco_pct_series]
+    # Null where the track is not on ink. Short internal dropouts (dotted pen,
+    # a few px of blur) stay filled; paper edges and real gaps do not.
+    fhr_valid = _columns_on_ink(trace_u8, y_fhr_px)
+    if has_mhr_trace:
+        mhr_valid = _columns_on_ink(trace_u8, y_mhr_px)
+    else:
+        mhr_valid = np.zeros(w, dtype=bool)
+    toco_valid = _columns_on_ink(trace_u8, y_toco_px)
+
+    # The fetal path rides the 110 bpm grid line until the pen is down. The
+    # maternal path is on the same time stamp until that same column; afterwards
+    # it lies on its own pen (often on the 70 or 80 line, so it cannot be told
+    # from the grid by y alone).
+    fhr_grid_step = 0.25 * px_per_cm
+    pen_start = _leading_gridlock_end(y_fhr_px, origin=float(fhr_y0), step=fhr_grid_step)
+    if pen_start > 0:
+        fhr_valid[:pen_start] = False
+        mhr_valid[:pen_start] = False
+
+    # A long dwell on the toco zero line is the tracker falling through the
+    # printed "PHILIPS" word in the gap before the pen, not a contraction of 0.
+    zero_y = float(toco_y0) + 100.0 * toco_px_per_pct
+    on_zero = np.abs(y_toco_px - zero_y) <= 6.0
+    zx = 0
+    while zx < w:
+        if not on_zero[zx]:
+            zx += 1
+            continue
+        zx1 = zx
+        while zx1 < w and on_zero[zx1]:
+            zx1 += 1
+        if zx1 - zx > 20:
+            toco_valid[zx:zx1] = False
+        zx = zx1
+
+    fhr_valid = _bridge_internal_gaps(fhr_valid, _INK_BRIDGE_PX)
+    mhr_valid = _bridge_internal_gaps(mhr_valid, _INK_BRIDGE_PX)
+    toco_valid = _bridge_internal_gaps(toco_valid, _INK_BRIDGE_PX)
+
+    fhr_series = _resample_with_gaps(fhr_bpm_px, fhr_valid, x_query, xs_full, 1)
+    mhr_series = _resample_with_gaps(mhr_bpm_px, mhr_valid, x_query, xs_full, 1)
+    toco_pct_series = _resample_with_gaps(toco_pct_px, toco_valid, x_query, xs_full, 1)
+    toco_kpa_series = [
+        None if v is None else round(float(v) * TOCO_KPA_PER_PCT, 2) for v in toco_pct_series
+    ]
 
     events = _detect_kineto_events(trace_u8, toco_y0, px_per_sec=px_per_sec, px_per_cm=px_per_cm)
+
+    stamps = find_time_stamps(pano_bgr)
+    first_stamp_x = float(stamps[0]["x_px"]) if stamps else None
+    clock_at_zero = _clock_at_left_edge(ext_cfg.started_at_iso, first_stamp_x, px_per_sec)
 
     # Build exact per-scan time intervals [t0, t1] directly from Panorama Stitch placements!
     pms = stitch_meta.get("pair_matches", [])
@@ -386,7 +647,9 @@ def run_extract_pipeline(
     ctg_session = {
         "id": session_id,
         "title": session_title,
-        "startedAt": ext_cfg.started_at_iso,
+        # Clock at sample 0 (the left edge of the panorama), not the header time.
+        "startedAt": clock_at_zero.isoformat(timespec="seconds"),
+        "recordingStartedAt": ext_cfg.started_at_iso,
         "durationSec": duration_sec,
         "dt": int(dt) if dt.is_integer() else dt,
         "device": ext_cfg.device_name,
@@ -406,6 +669,7 @@ def run_extract_pipeline(
         "mhr": mhr_series,
         "toco": toco_kpa_series,
         "tocoPct": toco_pct_series,
+        "tocoKpaPerPct": TOCO_KPA_PER_PCT,
         "events": events,
         "scans": [{k: v for k, v in s.items() if k != "source_frame"} for s in scans_meta],
     }
@@ -417,16 +681,19 @@ def run_extract_pipeline(
     with trace_csv_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
         writer.writerow(["t_sec", "clock", "x_cm", "fhr_bpm", "mhr_bpm", "toco_kpa", "toco_pct"])
+        def _cell(value: float | None) -> float | str:
+            return "" if value is None else value
+
         for idx_t, t_val in enumerate(t_grid):
             writer.writerow(
                 [
                     int(round(t_val)) if dt.is_integer() else round(float(t_val), 2),
-                    _clock_str(ext_cfg.started_at_iso, float(t_val)),
+                    _clock_str(clock_at_zero, float(t_val)),
                     round(float(t_val) * speed_cm_min / 60.0, 3),
-                    fhr_series[idx_t],
-                    mhr_series[idx_t],
-                    toco_kpa_series[idx_t],
-                    toco_pct_series[idx_t],
+                    _cell(fhr_series[idx_t]),
+                    _cell(mhr_series[idx_t]),
+                    _cell(toco_kpa_series[idx_t]),
+                    _cell(toco_pct_series[idx_t]),
                 ]
             )
 
@@ -456,19 +723,39 @@ def run_extract_pipeline(
     if ext_cfg.write_overlay_png:
         overlay_png_path = paths.output_dir / "panorama_extracted_overlay.png"
         ov = pano_bgr.copy()
-        pts_f = np.column_stack([np.arange(w), np.round(y_fhr_px)]).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(ov, [pts_f], False, (30, 45, 235), 2, cv2.LINE_AA)  # Vivid Red = FHR
+
+        def _draw_valid(y_px: np.ndarray, valid_px: np.ndarray, color: tuple[int, int, int]) -> None:
+            # Break the polyline at gaps so a missing trace is not drawn across blank paper.
+            run_x: list[int] = []
+            run_y: list[int] = []
+
+            def flush() -> None:
+                if len(run_x) >= 2:
+                    pts = np.column_stack([run_x, run_y]).astype(np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(ov, [pts], False, color, 2, cv2.LINE_AA)
+
+            for x_i in range(w):
+                if valid_px[x_i]:
+                    run_x.append(x_i)
+                    run_y.append(int(round(float(y_px[x_i]))))
+                elif run_x:
+                    flush()
+                    run_x, run_y = [], []
+            flush()
+
+        _draw_valid(y_fhr_px, fhr_valid, (30, 45, 235))  # Vivid Red = FHR
         if has_mhr_trace:
-            pts_m = np.column_stack([np.arange(w), np.round(y_mhr_px)]).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(ov, [pts_m], False, (0, 140, 255), 2, cv2.LINE_AA)  # Orange/Copper = MHR
-        pts_t = np.column_stack([np.arange(w), np.round(y_toco_px)]).astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(ov, [pts_t], False, (220, 90, 20), 2, cv2.LINE_AA)  # Blue = Toco
+            _draw_valid(y_mhr_px, mhr_valid, (0, 140, 255))  # Orange = MHR
+        _draw_valid(y_toco_px, toco_valid, (220, 90, 20))  # Blue = Toco
         cv2.imwrite(str(overlay_png_path), ov, [cv2.IMWRITE_PNG_COMPRESSION, 6])
         del ov
 
-    fhr_arr = np.array(fhr_series, dtype=np.float64)
-    mhr_arr = np.array(mhr_series, dtype=np.float64)
-    toco_pct_arr = np.array(toco_pct_series, dtype=np.float64)
+    def _finite(series: list[float | None]) -> np.ndarray:
+        return np.array([v for v in series if v is not None], dtype=np.float64)
+
+    fhr_arr = _finite(fhr_series)
+    mhr_arr = _finite(mhr_series)
+    toco_pct_arr = _finite(toco_pct_series)
 
     summary = {
         "dataset_id": manifest.dataset_id,
@@ -476,11 +763,21 @@ def run_extract_pipeline(
         "samples_1hz": len(fhr_series),
         "duration_sec": duration_sec,
         "has_mhr_trace": has_mhr_trace,
-        "fhr_median_bpm": round(float(np.median(fhr_arr)), 1),
-        "fhr_p10_p90_bpm": [round(float(np.percentile(fhr_arr, 10)), 1), round(float(np.percentile(fhr_arr, 90)), 1)],
-        "mhr_median_bpm": round(float(np.median(mhr_arr)), 1) if has_mhr_trace else None,
-        "toco_median_pct": round(float(np.median(toco_pct_arr)), 1),
+        "fhr_valid_fraction": round(float(np.mean([v is not None for v in fhr_series])), 4),
+        "mhr_valid_fraction": round(float(np.mean([v is not None for v in mhr_series])), 4),
+        "toco_valid_fraction": round(float(np.mean([v is not None for v in toco_pct_series])), 4),
+        "fhr_median_bpm": round(float(np.median(fhr_arr)), 1) if len(fhr_arr) else None,
+        "fhr_p10_p90_bpm": (
+            [round(float(np.percentile(fhr_arr, 10)), 1), round(float(np.percentile(fhr_arr, 90)), 1)]
+            if len(fhr_arr)
+            else None
+        ),
+        "mhr_median_bpm": round(float(np.median(mhr_arr)), 1) if len(mhr_arr) else None,
+        "toco_median_pct": round(float(np.median(toco_pct_arr)), 1) if len(toco_pct_arr) else None,
+        "toco_kpa_per_pct": TOCO_KPA_PER_PCT,
         "kineto_events_detected": len(events),
+        "time_stamps_found": len(stamps),
+        "clock_at_left_edge": clock_at_zero.isoformat(timespec="seconds"),
         "outputs": {
             "ctg_session_json": str(session_json_path),
             "trace_csv": str(trace_csv_path),
@@ -490,94 +787,3 @@ def run_extract_pipeline(
     }
     return summary
 
-
-def export_to_ctg_project1(
-    paths: DatasetPaths,
-    target_repo_dir: Path,
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """Export extracted ``CtgSession`` JSON, CSVs, and ``paper.tsx``-calibrated rectified scans
-    directly into a local checkout of ``CmdOptionBare/CTG-Project1``.
-    """
-    session_src = paths.output_dir / "ctg_session.json"
-    if not session_src.exists():
-        run_extract_pipeline(paths, ext_cfg=ExtractConfig(session_id=session_id))
-
-    session_data = json.loads(session_src.read_text(encoding="utf-8"))
-    if session_id:
-        session_data["id"] = session_id
-    sid = session_data["id"]
-
-    target_repo_dir = target_repo_dir.resolve()
-    out_json = target_repo_dir / "src" / "data" / "ctg" / f"{sid}.json"
-    pub_dir = target_repo_dir / "public" / "ctg" / sid
-    scans_dir = pub_dir / "scans"
-
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    scans_dir.mkdir(parents=True, exist_ok=True)
-
-    # Remove extra `tocoPct` key only if strict consumer desired? TypeScript structural typing allows extra JSON keys,
-    # and keeping `CtgSession` exact keys guarantees 100% clean import in Vite/TS!
-    strict_keys = [
-        "id",
-        "title",
-        "startedAt",
-        "durationSec",
-        "dt",
-        "device",
-        "paper",
-        "speedCmMin",
-        "fhrScale",
-        "tocoScale",
-        "provenance",
-        "fhr",
-        "mhr",
-        "toco",
-        "events",
-        "scans",
-    ]
-    clean_session = {k: session_data[k] for k in strict_keys if k in session_data}
-    out_json.write_text(json.dumps(clean_session, indent=2) + "\n", encoding="utf-8")
-
-    shutil.copy2(paths.output_dir / "trace.csv", pub_dir / "trace.csv")
-    shutil.copy2(paths.output_dir / "events.csv", pub_dir / "events.csv")
-    if (paths.output_dir / "panorama.webp").exists():
-        shutil.copy2(paths.output_dir / "panorama.webp", pub_dir / "panorama.webp")
-
-    # Format each rectified frame into CTG-Project1 `paper.tsx` vertical layout:
-    #   img.height * [0.105 .. 0.505] -> FHR [200 .. 60 bpm]
-    #   img.height * [0.560 .. 0.860] -> Toco [12 .. 0 kPa] (= [100 .. 0 %])
-    manifest = DatasetManifest.load(paths.manifest_path)
-    px_per_cm = manifest.target_px_per_cm
-    y_200 = int(round((FHR_S_TOP_CM + (210.0 - 200.0) / 20.0) * px_per_cm))
-    y_60 = int(round((FHR_S_TOP_CM + (210.0 - 60.0) / 20.0) * px_per_cm))
-    y_t100 = int(round(TOCO_S_TOP_CM * px_per_cm))
-    y_t0 = int(round(TOCO_S_BOT_CM * px_per_cm))
-
-    exported_scans = 0
-    out_h = 1000
-    for entry in manifest.frames:
-        stem = Path(entry.filename).stem
-        rect_p = paths.rectified_dir / f"{stem}_rectified.png"
-        if not rect_p.exists():
-            continue
-        rbgr = cv2.imread(str(rect_p), cv2.IMREAD_COLOR)
-        if rbgr is None:
-            continue
-        fw = rbgr.shape[1]
-        out_w = max(64, int(round(fw * (400.0 / max(1, y_60 - y_200)))))
-        formatted = np.full((out_h, out_w, 3), (231, 241, 243), dtype=np.uint8)
-        fhr_crop = cv2.resize(rbgr[y_200:y_60, :], (out_w, 400), interpolation=cv2.INTER_AREA)
-        toco_crop = cv2.resize(rbgr[y_t100:y_t0, :], (out_w, 300), interpolation=cv2.INTER_AREA)
-        formatted[105:505, :] = fhr_crop
-        formatted[560:860, :] = toco_crop
-        cv2.imwrite(str(scans_dir / f"{stem}.jpg"), formatted, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
-        exported_scans += 1
-
-    return {
-        "target_repo": str(target_repo_dir),
-        "session_json": str(out_json),
-        "trace_csv": str(pub_dir / "trace.csv"),
-        "events_csv": str(pub_dir / "events.csv"),
-        "scans_exported": exported_scans,
-    }

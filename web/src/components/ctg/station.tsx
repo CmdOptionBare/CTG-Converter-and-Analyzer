@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Download, Minus, Plus } from "lucide-react";
 import { sessions } from "@/data/sessions";
 import { clockOf, formatSample, tocoKpa, toCsv, windowStats } from "@/lib/ctg/analyze";
@@ -63,20 +64,25 @@ export function Station() {
             {session.device} · {session.paper} · Ablesung, kein Befund
           </p>
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-paper/70">Aufnahme</span>
-          <select
-            className="rounded-card border border-line bg-raised px-3 py-2 text-paper"
-            value={session.id}
-            onChange={(e) => setSessionId(e.target.value)}
-          >
-            {sessions.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.title}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-paper/70">Aufnahme</span>
+            <select
+              className="rounded-card border border-line bg-raised px-3 py-2 text-paper"
+              value={session.id}
+              onChange={(e) => setSessionId(e.target.value)}
+            >
+              {sessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Link to="/analyse" className="rounded-card border border-copper px-3 py-2 text-sm text-copper">
+            Analyse
+          </Link>
+        </div>
       </header>
 
       <div className="flex gap-2 overflow-x-auto border-b border-line px-3 py-2">
@@ -182,6 +188,9 @@ export function Station() {
         <TabButton active={tab === "pipeline"} onClick={() => setTab("pipeline")}>
           Pipeline
         </TabButton>
+        <Link to="/analyse" className="rounded-card px-3 py-2 text-sm text-paper/70">
+          Analyse
+        </Link>
         <span className="mx-1 hidden h-6 w-px bg-line sm:block" />
         <Toggle on={showFhr} onClick={() => setShowFhr((v) => !v)}>
           FHF
